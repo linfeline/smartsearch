@@ -186,10 +186,11 @@ def test_release_version_metadata_and_tarball_support_are_synchronized():
     package_json = json.loads((ROOT / "package.json").read_text(encoding="utf-8"))
     package_lock = json.loads((ROOT / "package-lock.json").read_text(encoding="utf-8"))
 
-    assert package_json["version"] == "0.1.15"
-    assert package_lock["version"] == "0.1.15"
-    assert package_lock["packages"][""]["version"] == "0.1.15"
-    assert read_pyproject_version() == "0.1.15"
+    version = package_json["version"]
+    assert version
+    assert package_lock["version"] == version
+    assert package_lock["packages"][""]["version"] == version
+    assert read_pyproject_version() == version
     assert package_json["scripts"]["check:skill-parity"] == "node npm/scripts/check-skill-parity.js"
     assert package_json["scripts"]["smoke:tarball"] == "node npm/scripts/smoke-packed-install.js"
 

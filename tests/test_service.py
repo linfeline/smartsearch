@@ -340,6 +340,8 @@ def test_jina_and_zhipu_mcp_config_defaults_and_saved_values(monkeypatch, tmp_pa
     assert service.config.zhipu_mcp_search_api_url == "https://open.bigmodel.cn/api/mcp/web_search_prime/mcp"
     assert service.config.zhipu_mcp_reader_api_url == "https://open.bigmodel.cn/api/mcp/web_reader/mcp"
     assert service.config.zhipu_mcp_zread_api_url == "https://open.bigmodel.cn/api/mcp/zread/mcp"
+    assert service.config.doubao_search_api_url == "https://open.feedcoopapi.com"
+    assert service.config.doubao_search_api_key is None
 
     service.config_set("JINA_API_KEY", "jina-test-secret")
     service.config_set("JINA_READER_API_URL", "https://reader.example.com")
@@ -350,6 +352,9 @@ def test_jina_and_zhipu_mcp_config_defaults_and_saved_values(monkeypatch, tmp_pa
     service.config_set("ZHIPU_MCP_READER_API_URL", "https://zmcp.example.com/reader")
     service.config_set("ZHIPU_MCP_ZREAD_API_URL", "https://zmcp.example.com/zread")
     service.config_set("ZHIPU_MCP_TIMEOUT_SECONDS", "12")
+    service.config_set("DOUBAO_SEARCH_API_KEY", "doubao-test-secret")
+    service.config_set("DOUBAO_SEARCH_API_URL", "https://doubao.example.com")
+    service.config_set("DOUBAO_SEARCH_TIMEOUT_SECONDS", "15")
 
     assert service.config.jina_api_key == "jina-test-secret"
     assert service.config.jina_reader_api_url == "https://reader.example.com"
@@ -360,6 +365,9 @@ def test_jina_and_zhipu_mcp_config_defaults_and_saved_values(monkeypatch, tmp_pa
     assert service.config.zhipu_mcp_reader_api_url == "https://zmcp.example.com/reader"
     assert service.config.zhipu_mcp_zread_api_url == "https://zmcp.example.com/zread"
     assert service.config.zhipu_mcp_timeout == 12.0
+    assert service.config.doubao_search_api_key == "doubao-test-secret"
+    assert service.config.doubao_search_api_url == "https://doubao.example.com"
+    assert service.config.doubao_search_timeout == 15.0
 
 
 def test_environment_overrides_config_file(monkeypatch, tmp_path):
@@ -768,6 +776,17 @@ def test_research_router_uses_zhipu_for_chinese_current_policy(monkeypatch):
 
     assert routes["signals"]["current_or_locale_intent"] is True
     assert routes["capabilities"]["web_search"]["providers"][0] == "zhipu"
+
+
+def test_research_router_uses_doubao_before_zhipu_for_chinese_current(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
+    monkeypatch.setenv("DOUBAO_SEARCH_API_KEY", "doubao-secret")
+
+    routes = service._research_capability_routes("今天国内 AI 政策最新公告", _research_plan("今天国内 AI 政策最新公告"), "auto")
+
+    assert routes["signals"]["current_or_locale_intent"] is True
+    assert routes["capabilities"]["web_search"]["providers"][:2] == ["doubao", "zhipu"]
 
 
 def test_research_router_favors_jina_for_known_url_pdf_and_firecrawl_for_dynamic(monkeypatch):
@@ -1426,7 +1445,7 @@ def test_zhipu_mcp_key_satisfies_web_search_and_reader_fetch_as_separate_provide
     assert result["ok"] is True
     assert result["missing"] == []
     assert result["capability_status"]["web_search"]["configured"] == ["zhipu-mcp"]
-    assert result["capability_status"]["web_search"]["fallback_chain"] == ["zhipu", "zhipu-mcp", "tavily", "firecrawl"]
+    assert result["capability_status"]["web_search"]["fallback_chain"] == ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"]
     assert result["capability_status"]["web_fetch"]["configured"] == ["zhipu-mcp-reader"]
 
 

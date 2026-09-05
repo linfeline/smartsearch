@@ -56,7 +56,7 @@ Intent router rules:
 - Same-capability fallback is allowed; cross-capability fallback is not. Context7 is not used for unrelated broad web queries, and page extraction providers are not used as docs search providers.
 - `TAVILY_ENABLED=false` removes Tavily from registered `web_search` and `web_fetch` routes even when its key is present. Direct Tavily search/extract calls, `map`, `doctor`, and smoke must make no Tavily network request; `map` reports a local configuration error. Firecrawl remains independently configured and all fallback stays within its capability.
 - `main_search`: xAI Responses first for Grok/xAI, then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
-- `web_search`: Zhipu Web Search API first when routed in, then Zhipu Coding Plan MCP `web_search_prime`, then Tavily / Firecrawl source search when configured.
+- `web_search`: Doubao Search first when routed in, then Zhipu Web Search API, then Zhipu Coding Plan MCP `web_search_prime`, then Tavily / Firecrawl source search when configured.
 - `docs_search`: Context7 first for library/API/docs intent, then Exa for official-domain, paper, product-page, trusted-site, or low-noise supplemental discovery.
 - Automatic Context7 selection has no preferred library-id map. A candidate needs normalized query-subject overlap in its title or id; title/id exact and multi-token matches dominate, while description/trust/benchmark only break ties. When no candidate is eligible, Context7 is recorded as empty and can fall through to same-capability Exa. Explicit `context7-library` output and explicit `context7-docs LIBRARY_ID` remain unchanged.
 - Fetch capability: Tavily first, then Jina Reader with `JINA_API_KEY`, then Zhipu Coding Plan MCP `webReader`, then Firecrawl.
@@ -70,6 +70,7 @@ Intent router rules:
 - `anysearch-domains`, `anysearch-search`, `anysearch-extract`, and `anysearch-batch` use AnySearch only. Treat results as acceptance evidence until the target vertical domain is reviewed.
 - `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, and `sciverse-relations` use Sciverse only. They are explicit academic commands and must not be inserted into default provider fallback.
 - `zhipu-search` uses Zhipu only.
+- `doubao-search` uses Doubao Search / Volcengine Search Infinity only.
 - `zhipu-mcp-search`, `zhipu-mcp-reader`, and `zhipu-mcp-*` zread commands use Zhipu Coding Plan Remote MCP only.
 - Runtime config priority is environment variables first, then local config file, then defaults.
 - `setup` and `config` read/write the local Smart Search config file and do not call providers.
@@ -85,6 +86,12 @@ Zhipu Web Search API:
 - `zhipu-search` corresponds to the official Zhipu Web Search API route, using `ZHIPU_API_URL` plus `ZHIPU_SEARCH_ENGINE`; it is not Zhipu Chat Completions `tools=[web_search]`, not Search Agent, and not the MCP Server.
 - `ZHIPU_SEARCH_ENGINE` defaults to `search_std`. Official Web Search API service values include `search_std`, `search_pro`, `search_pro_sogou`, and `search_pro_quark`; keep custom values possible because official services may change.
 - `TAVILY_API_URL` only affects Tavily REST calls and does not proxy Zhipu.
+
+Doubao Search:
+
+- `doubao-search` corresponds to the official Doubao Search Custom REST route at `DOUBAO_SEARCH_API_URL` plus `DOUBAO_SEARCH_API_KEY`. It is Search Infinity, not an Ark chat Completions key, not the Volcengine Responses web_search plugin, and not AK/SK signing.
+- `DOUBAO_SEARCH_API_URL` defaults to `https://open.feedcoopapi.com` and calls `/search_api/web_search`.
+- Doubao Search is optional `web_search` reinforcement. It is not part of the `standard` minimum profile.
 
 Zhipu Coding Plan Remote MCP:
 
@@ -158,6 +165,7 @@ Exa domain filters:
 - Use `exa-search --include-domains` when official documentation domains are known.
 - Use `context7-library` / `context7-docs` for docs/API/SDK/library/framework intent when Context7 is configured.
 - Use `zhipu-search` for Chinese, domestic, current, or domain-filtered source discovery when Zhipu is configured.
+- Use `doubao-search` for the same Chinese/domestic/current discovery when Doubao Search is configured.
 - Use `exa-search --start-published-date` for recency-constrained source discovery.
 - Use `exa-similar` when a known good page is available and adjacent sources are needed.
 - Use `search --format content` when a human wants only the generated answer body.

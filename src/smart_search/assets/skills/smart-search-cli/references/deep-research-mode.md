@@ -43,7 +43,7 @@ Default orchestration:
 2. Call `smart-search deep "question" --format json` to create an offline `research_plan`.
 3. Inspect `intent_signals`, `decomposition`, and `capability_plan`; do not choose fixed topic recipe ids.
 4. Execute planned `smart-search search ... --validation balanced --extra-sources 1..3` steps for broad discovery and read routing metadata.
-5. Execute planned `exa-search`, `exa-similar`, `zhipu-search`, `context7-library`, `context7-docs`, or `map` only when their capability boundary matches the intent.
+5. Execute planned `exa-search`, `exa-similar`, `zhipu-search`, `doubao-search`, `context7-library`, `context7-docs`, or `map` only when their capability boundary matches the intent.
 6. Use `fetch` on key URLs before making claim-level statements.
 7. Run `gap_check`: if an important claim lacks fetched evidence, fetch another source or mark the claim/source as unverified.
 
@@ -137,7 +137,7 @@ Use this shape as the planning artifact:
 
 ## Step Contract
 
-Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `zhipu-search`, `context7-library`, `context7-docs`, `fetch`, and `map`; these are the only valid `steps[].tool` values and map to existing CLI commands only. `doctor` is a `preflight` action, not a `steps[]` item. Simple plans may have one subquestion; complex plans should use 2-6 subquestions unless the user explicitly asks for exhaustive coverage.
+Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `zhipu-search`, `doubao-search`, `context7-library`, `context7-docs`, `fetch`, and `map`; these are the only valid `steps[].tool` values and map to existing CLI commands only. `doctor` is a `preflight` action, not a `steps[]` item. Simple plans may have one subquestion; complex plans should use 2-6 subquestions unless the user explicitly asks for exhaustive coverage.
 
 Each `steps[]` item must include `id`, `subquestion_id`, `tool`, `purpose`, `command`, and `output_path`. `steps[].command` and `steps[].output_path` are one contract: the `--output` path embedded in the executable command must match `output_path`, otherwise the AI agent cannot reliably find saved evidence.
 
@@ -147,6 +147,7 @@ Prefer PowerShell-safe quoted commands in generated plans because Windows users 
 
 - `search`: broad discovery and synthesis through `main_search`; use returned `routing_decision`, `provider_attempts`, `fallback_used`, and `source_warning` as orchestration signals, not as claim proof.
 - `zhipu-search`: Chinese, domestic, current, policy/regulatory, announcement, and China-local source discovery.
+- `doubao-search`: ByteDance Doubao Search / Search Infinity for the same Chinese, domestic, current, and China-local source discovery.
 - `context7-library` and `context7-docs`: library, SDK, API, framework, and documentation intent. Prefer Context7 before Exa for docs/API questions.
 - `exa-search`: low-noise source discovery for official domains, papers, product pages, known domains, and trusted pages. Do not treat Exa as the universal second hop for every high-risk or verification task.
 - `exa-similar`: adjacent-source discovery when a known reliable URL is available.

@@ -90,7 +90,7 @@ def test_deep_research_skill_contract_public_and_packaged_assets_match():
         "smart-search deep",
         "decomposition",
         "usage_boundary",
-        "search`, `exa-search`, `exa-similar`, `zhipu-search`, `context7-library`, `context7-docs`, `fetch`, and `map`",
+        "search`, `exa-search`, `exa-similar`, `zhipu-search`, `doubao-search`, `context7-library`, `context7-docs`, `fetch`, and `map`",
         "`doctor` is a `preflight` action",
         "fixed topic recipe",
         "深度搜索一下最近的比特币行情",
@@ -139,7 +139,7 @@ def test_deep_research_cli_contract_documents_plan_and_smoke_matrix():
         "`gap_check`: how the agent verifies",
         "`final_answer_policy`: how to cite fetched evidence",
         "`usage_boundary`: user-facing distinction",
-        "Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `zhipu-search`, `context7-library`, `context7-docs`, `fetch`, and `map`",
+        "Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `zhipu-search`, `doubao-search`, `context7-library`, `context7-docs`, `fetch`, and `map`",
         "`doctor` is a `preflight` action, not a `steps[]` item",
         "must not require fixed topic recipe ids",
         "fixed topic recipe ids are not required schema",
@@ -285,6 +285,8 @@ def test_readme_language_split_and_provider_links_are_documented():
         "https://context7.com/docs",
         "https://docs.bigmodel.cn/cn/guide/tools/web-search",
         "https://open.bigmodel.cn/usercenter/apikeys",
+        "https://www.volcengine.com/docs/87772/2272953",
+        "https://console.volcengine.com/search-infinity/api-key",
         "https://docs.tavily.com/",
         "https://app.tavily.com/home",
         "https://docs.firecrawl.dev/",
@@ -343,6 +345,43 @@ def test_zhipu_setup_contract_public_and_packaged_assets_match():
     for marker in zh_required_markers:
         assert marker in readme_zh
     for marker in ["--zhipu-api-url", "--zhipu-search-engine"]:
+        assert marker in public_contract
+        assert marker in packaged_contract
+
+
+def test_doubao_setup_contract_public_and_packaged_assets_match():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
+    packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
+    public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
+    packaged_contract = _read_reference_tree(PACKAGED_SKILL_DIR)
+    required_markers = [
+        "--doubao-key",
+        "--doubao-api-url",
+        "DOUBAO_SEARCH_API_KEY",
+        "DOUBAO_SEARCH_API_URL",
+        "doubao-search",
+        "open.feedcoopapi.com",
+        "Search Infinity",
+        "not an Ark",
+    ]
+    for marker in required_markers:
+        assert marker in readme
+        assert marker in public_text
+        assert marker in packaged_text
+    zh_required_markers = [
+        "--doubao-key",
+        "--doubao-api-url",
+        "DOUBAO_SEARCH_API_KEY",
+        "DOUBAO_SEARCH_API_URL",
+        "doubao-search",
+        "open.feedcoopapi.com",
+        "不是方舟",
+    ]
+    for marker in zh_required_markers:
+        assert marker in readme_zh
+    for marker in ["--doubao-key", "--doubao-api-url", "doubao-search"]:
         assert marker in public_contract
         assert marker in packaged_contract
 

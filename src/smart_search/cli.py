@@ -41,6 +41,7 @@ COMMAND_ALIASES = {
     "exa-search": ["exa", "x"],
     "exa-similar": ["xs"],
     "zhipu-search": ["z", "zp"],
+    "doubao-search": ["dd", "volc-search"],
     "zhipu-mcp-search": ["zmcp-search"],
     "zhipu-mcp-reader": ["zmcp-reader"],
     "zhipu-mcp-search-doc": ["zmcp-doc"],
@@ -97,6 +98,7 @@ class SmartSearchArgumentParser(argparse.ArgumentParser):
 TAVILY_DEFAULT_API_URL = "https://api.tavily.com"
 FIRECRAWL_DEFAULT_API_URL = "https://api.firecrawl.dev/v2"
 ZHIPU_DEFAULT_API_URL = "https://open.bigmodel.cn/api"
+DOUBAO_DEFAULT_API_URL = "https://open.feedcoopapi.com"
 ZHIPU_SEARCH_ENGINE_CHOICES = [
     "search_std",
     "search_pro",
@@ -460,6 +462,7 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
         ("jina", data.get("jina_connection_test") or {}),
         ("firecrawl", data.get("firecrawl_connection_test") or {}),
         ("zhipu", data.get("zhipu_connection_test") or {}),
+        ("doubao", data.get("doubao_connection_test") or {}),
         ("zhipu-mcp", data.get("zhipu_mcp_connection_test") or {}),
         ("context7", data.get("context7_connection_test") or {}),
     ]
@@ -975,6 +978,7 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         "exa-search": "Exa Search",
         "exa-similar": "Exa Similar Pages",
         "zhipu-search": "Zhipu Search",
+        "doubao-search": "Doubao Search",
         "zhipu-mcp-search": "Zhipu Coding Plan MCP Search",
         "zhipu-mcp-reader": "Zhipu Coding Plan MCP Reader",
         "zhipu-mcp-search-doc": "Zhipu Coding Plan MCP Search Doc",
@@ -1157,6 +1161,7 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         "exa-search",
         "exa-similar",
         "zhipu-search",
+        "doubao-search",
         "zhipu-mcp-search",
         "zhipu-mcp-reader",
         "zhipu-mcp-search-doc",
@@ -1321,6 +1326,7 @@ def _display_provider(provider: str, lang: str) -> str:
         "xai-responses": "xAI Responses",
         "openai-compatible": "OpenAI-compatible",
         "zhipu": _t(lang, "智谱", "Zhipu"),
+        "doubao": _t(lang, "豆包搜索", "Doubao Search"),
         "zhipu-mcp": _t(lang, "智谱 Coding Plan MCP", "Zhipu Coding Plan MCP"),
         "zhipu-mcp-reader": _t(lang, "智谱 MCP Reader", "Zhipu MCP Reader"),
         "exa": "Exa",
@@ -1378,6 +1384,10 @@ def _normalize_firecrawl_api_url(url: str) -> str:
 
 
 def _normalize_zhipu_api_url(url: str) -> str:
+    return _normalize_custom_base_url(url)
+
+
+def _normalize_doubao_api_url(url: str) -> str:
     return _normalize_custom_base_url(url)
 
 
@@ -1504,6 +1514,7 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
             "configured": [
                 provider
                 for provider, configured in [
+                    ("doubao", has("DOUBAO_SEARCH_API_KEY")),
                     ("zhipu", has("ZHIPU_API_KEY")),
                     ("zhipu-mcp", has("ZHIPU_MCP_API_KEY")),
                     ("tavily", has("TAVILY_API_KEY")),
@@ -1511,7 +1522,7 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
                 ]
                 if configured
             ],
-            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+            "fallback_chain": list(service.WEB_SEARCH_FALLBACK_CHAIN),
         },
         "docs_search": {
             "configured": [
@@ -2070,6 +2081,46 @@ def _prompt_zhipu_search_engine(values: dict[str, str], current: dict[str, str],
     values["ZHIPU_SEARCH_ENGINE"] = choice
 
 
+def _prompt_doubao_api_url(values: dict[str, str], current: dict[str, str], lang: str) -> None:
+    current_url = current.get("DOUBAO_SEARCH_API_URL", "")
+    choices = []
+    if current_url:
+        choices.append({"name": _t(lang, "保留当前地址（已配置）", "Keep current URL (configured)"), "value": "current"})
+    choices.extend(
+        [
+            {
+                "name": _t(
+                    lang,
+                    "官方豆包搜索 Custom API (https://open.feedcoopapi.com)",
+                    "Official Doubao Search Custom API (https://open.feedcoopapi.com)",
+                ),
+                "value": "official",
+            },
+            {
+                "name": _t(lang, "自定义豆包搜索 API 地址", "Custom Doubao Search API URL"),
+                "value": "custom",
+            },
+        ]
+    )
+    default_choice = "current" if current_url else "official"
+    choice = _prompt_select(_t(lang, "选择豆包搜索 API 地址", "Choose Doubao Search API URL"), choices, default_choice)
+    if choice == "current":
+        return
+    if choice == "official":
+        values["DOUBAO_SEARCH_API_URL"] = DOUBAO_DEFAULT_API_URL
+        return
+    raw = _prompt_value(
+        "DOUBAO_SEARCH_API_URL",
+        _t(lang, "豆包搜索 API 地址", "Doubao Search API URL"),
+        current_url,
+        optional=False,
+        lang=lang,
+    )
+    normalized = _normalize_doubao_api_url(raw)
+    if normalized:
+        values["DOUBAO_SEARCH_API_URL"] = normalized
+
+
 def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str) -> None:
     status = _setup_status_from_values(_merge_setup_values(current, values))
     default_selected = status["web_fetch"]["configured"] or ["tavily"]
@@ -2117,17 +2168,29 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
     _write_stderr(
         _t(
             lang,
-            "\n[可选增强] web_search 网页补强\n用途: 中文、国内、时效、域名过滤类来源检索。\n推荐: 中文场景建议配置 Zhipu。\n",
-            "\n[Optional] web_search web reinforcement\nPurpose: Chinese, domestic, current, or domain-filtered source discovery.\nRecommended: configure Zhipu for Chinese/current scenarios.\n",
+            "\n[可选增强] web_search 网页补强\n用途: 中文、国内、时效、域名过滤类来源检索。\n推荐: 中文场景建议配置豆包搜索或智谱。\n",
+            "\n[Optional] web_search web reinforcement\nPurpose: Chinese, domestic, current, or domain-filtered source discovery.\nRecommended: configure Doubao Search or Zhipu for Chinese/current scenarios.\n",
         )
     )
-    default_selected = ["zhipu"] if current.get("ZHIPU_API_KEY") else []
+    default_selected = []
+    if current.get("DOUBAO_SEARCH_API_KEY"):
+        default_selected.append("doubao")
+    if current.get("ZHIPU_API_KEY"):
+        default_selected.append("zhipu")
     selected = _prompt_provider_multi_select(
         _t(lang, "选择可选 web_search 增强", "Choose optional web_search reinforcement"),
-        ["zhipu"],
+        ["doubao", "zhipu"],
         default_selected,
         lang,
     )
+    if "doubao" in selected:
+        values["DOUBAO_SEARCH_API_KEY"] = _prompt_value(
+            "DOUBAO_SEARCH_API_KEY",
+            "Doubao Search API key",
+            current.get("DOUBAO_SEARCH_API_KEY", ""),
+            lang=lang,
+        )
+        _prompt_doubao_api_url(values, current, lang)
     if "zhipu" in selected:
         values["ZHIPU_API_KEY"] = _prompt_value("ZHIPU_API_KEY", "Zhipu API key", current.get("ZHIPU_API_KEY", ""), lang=lang)
         _prompt_zhipu_api_url(values, current, lang)
@@ -2396,6 +2459,9 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("ZHIPU_API_KEY", "Zhipu API key", True),
         ("ZHIPU_API_URL", "Zhipu Web Search API URL", True),
         ("ZHIPU_SEARCH_ENGINE", "Zhipu search service (search_std/search_pro/search_pro_sogou/search_pro_quark/custom)", True),
+        ("DOUBAO_SEARCH_API_KEY", "Doubao Search API key", True),
+        ("DOUBAO_SEARCH_API_URL", "Doubao Search API URL", True),
+        ("DOUBAO_SEARCH_TIMEOUT_SECONDS", "Doubao Search timeout seconds", True),
         ("ZHIPU_MCP_API_KEY", "Zhipu Coding Plan MCP API key", True),
         ("ZHIPU_MCP_SEARCH_API_URL", "Zhipu Coding Plan search MCP URL", True),
         ("ZHIPU_MCP_READER_API_URL", "Zhipu Coding Plan reader MCP URL", True),
@@ -2426,6 +2492,8 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
             value = _normalize_firecrawl_api_url(value)
         elif key == "ZHIPU_API_URL":
             value = _normalize_zhipu_api_url(value)
+        elif key == "DOUBAO_SEARCH_API_URL":
+            value = _normalize_doubao_api_url(value)
         elif key == "JINA_READER_API_URL":
             value = _normalize_jina_reader_api_url(value)
         elif key in {"ZHIPU_MCP_SEARCH_API_URL", "ZHIPU_MCP_READER_API_URL", "ZHIPU_MCP_ZREAD_API_URL"}:
@@ -2503,6 +2571,16 @@ async def _run_async(args: argparse.Namespace) -> int:
             content_size=args.content_size,
         )
         return _print_result("zhipu-search", data, args.format, args.output)
+    if args.command == "doubao-search":
+        data = await service.doubao_search(
+            args.query,
+            count=args.count,
+            time_range=args.time_range,
+            sites=args.sites,
+            auth_level=args.auth_level,
+            need_content=not args.no_content,
+        )
+        return _print_result("doubao-search", data, args.format, args.output)
     if args.command == "zhipu-mcp-search":
         data = await service.zhipu_mcp_search(args.query, count=args.count)
         return _print_result("zhipu-mcp-search", data, args.format, args.output)
@@ -2728,6 +2806,9 @@ def _run_setup(args: argparse.Namespace) -> int:
         "ZHIPU_API_KEY": args.zhipu_key,
         "ZHIPU_API_URL": _normalize_zhipu_api_url(args.zhipu_api_url),
         "ZHIPU_SEARCH_ENGINE": args.zhipu_search_engine,
+        "DOUBAO_SEARCH_API_KEY": args.doubao_key,
+        "DOUBAO_SEARCH_API_URL": _normalize_doubao_api_url(args.doubao_api_url),
+        "DOUBAO_SEARCH_TIMEOUT_SECONDS": args.doubao_timeout,
         "ZHIPU_MCP_API_KEY": args.zhipu_mcp_key,
         "ZHIPU_MCP_SEARCH_API_URL": _normalize_custom_base_url(args.zhipu_mcp_search_api_url),
         "ZHIPU_MCP_READER_API_URL": _normalize_custom_base_url(args.zhipu_mcp_reader_api_url),
@@ -2826,6 +2907,7 @@ def _run_regression() -> int:
         "tests/test_cli.py",
         "tests/test_service.py",
         "tests/test_providers_new.py",
+        "tests/test_doubao_provider.py",
         "tests/test_jina_provider.py",
         "tests/test_zhipu_mcp_provider.py",
         "tests/test_smoke.py",
@@ -2946,6 +3028,20 @@ def build_parser() -> argparse.ArgumentParser:
     zhipu_parser.add_argument("--search-domain-filter", default="")
     zhipu_parser.add_argument("--content-size", choices=["medium", "high"], default="medium")
     _add_format_args(zhipu_parser)
+
+    doubao_parser = sub.add_parser(
+        "doubao-search",
+        aliases=COMMAND_ALIASES["doubao-search"],
+        help="Run Doubao Search (Volcengine Search Infinity) source-first search.",
+    )
+    doubao_parser.set_defaults(command="doubao-search")
+    doubao_parser.add_argument("query")
+    doubao_parser.add_argument("--count", type=int, default=10)
+    doubao_parser.add_argument("--time-range", default="", help="OneDay/OneWeek/OneMonth/OneYear or YYYY-MM-DD..YYYY-MM-DD")
+    doubao_parser.add_argument("--sites", default="", help="Pipe-separated host allowlist, e.g. example.com|news.cn")
+    doubao_parser.add_argument("--auth-level", type=int, choices=[0, 1], default=0)
+    doubao_parser.add_argument("--no-content", action="store_true", help="Do not request webpage body snippets.")
+    _add_format_args(doubao_parser)
 
     zhipu_mcp_search_parser = sub.add_parser(
         "zhipu-mcp-search",
@@ -3282,6 +3378,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--zhipu-key", default="", help="Save ZHIPU_API_KEY.")
     setup_parser.add_argument("--zhipu-api-url", default="", help="Save ZHIPU_API_URL.")
     setup_parser.add_argument("--zhipu-search-engine", default="", help="Save ZHIPU_SEARCH_ENGINE.")
+    setup_parser.add_argument("--doubao-key", default="", help="Save DOUBAO_SEARCH_API_KEY.")
+    setup_parser.add_argument("--doubao-api-url", default="", help="Save DOUBAO_SEARCH_API_URL.")
+    setup_parser.add_argument("--doubao-timeout", default="", help="Save DOUBAO_SEARCH_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--zhipu-mcp-key", default="", help="Save ZHIPU_MCP_API_KEY.")
     setup_parser.add_argument("--zhipu-mcp-search-api-url", default="", help="Save ZHIPU_MCP_SEARCH_API_URL.")
     setup_parser.add_argument("--zhipu-mcp-reader-api-url", default="", help="Save ZHIPU_MCP_READER_API_URL.")

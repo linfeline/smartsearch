@@ -126,7 +126,7 @@ async def test_live_smoke_reports_skipped_optional_cases_without_failing(monkeyp
     assert result["ok"] is True
     assert result["status"] == "healthy"
     assert result["failed_cases"] == []
-    assert set(result["skipped_cases"]) == {"zhipu search", "context7 library", "web fetch fallback chain"}
+    assert set(result["skipped_cases"]) == {"zhipu search", "doubao search", "context7 library", "web fetch fallback chain"}
 
 
 @pytest.mark.asyncio

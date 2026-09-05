@@ -59,11 +59,15 @@
 
 - Setup and config output should include `ok` and `config_file`. Saved API keys must be masked in command output.
 - Use `smart-search setup --non-interactive --zhipu-api-url "https://open.bigmodel.cn/api" --zhipu-search-engine "search_std"` to save Zhipu Web Search API endpoint and search service without prompts.
+- Use `smart-search setup --non-interactive --doubao-key "key" --doubao-api-url "https://open.feedcoopapi.com"` to save Doubao Search Infinity credentials without prompts.
 - Interactive setup asks for Zhipu API key, API URL, and search service when optional `web_search` reinforcement selects Zhipu.
+- Interactive setup asks for Doubao Search API key and API URL when optional `web_search` reinforcement selects Doubao.
 - `config set ZHIPU_SEARCH_ENGINE VALUE` must remain free-form so newly added official services do not require a CLI release.
 - `ZHIPU_API_URL` defaults to `https://open.bigmodel.cn/api`.
 - `ZHIPU_SEARCH_ENGINE` defaults to `search_std`.
 - Official Web Search API service values include `search_std`, `search_pro`, `search_pro_sogou`, and `search_pro_quark`.
+- `DOUBAO_SEARCH_API_URL` defaults to `https://open.feedcoopapi.com`.
+- Doubao Search uses Search Infinity API keys from the Volcengine console; Ark keys are not interchangeable.
 - Use `smart-search setup --non-interactive --jina-key "key"` to let Jina satisfy `web_fetch`; `JINA_RESPOND_WITH=readerlm-v2` also requires `JINA_API_KEY`.
 - Use `smart-search setup --non-interactive --zhipu-mcp-key "key"` only when the user explicitly wants Coding Plan Remote MCP quota.
 - Use `smart-search setup --non-interactive --openai-compatible-stream true` only when an OpenAI-compatible relay benefits from SSE streaming for long requests. Default remains false.

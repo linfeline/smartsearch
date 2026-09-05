@@ -136,7 +136,7 @@ Trellis、hooks、agents 或 commands。
 | --- | --- | --- | --- |
 | `main_search` | `search` | xAI Responses、OpenAI-compatible Chat Completions | 综合回答、快速搜索、初步总结 |
 | `docs_search` | `context7-library`、`context7-docs`、`exa-search` | Context7、Exa | 官方文档、SDK、API、框架/库文档 |
-| `web_search` | `zhipu-search`、`zhipu-mcp-search`、`search` 内部意图补强 | 智谱 Web Search API、智谱 Coding Plan MCP、Tavily、Firecrawl | 中文、国内、时效、域名过滤、补充来源 |
+| `web_search` | `zhipu-search`、`doubao-search`、`zhipu-mcp-search`、`search` 内部意图补强 | 智谱 Web Search API、豆包搜索、智谱 Coding Plan MCP、Tavily、Firecrawl | 中文、国内、时效、域名过滤、补充来源 |
 | `web_fetch` | `fetch`、`zhipu-mcp-reader` | Tavily、Jina Reader、智谱 Coding Plan MCP Reader、Firecrawl | 已知 URL 正文抓取、证据提取 |
 | `vertical_search` | `anysearch-domains`、`anysearch-search`、`anysearch-extract`、`anysearch-batch`、`sciverse-catalog`、`sciverse-search`、`sciverse-semantic`、`sciverse-read`、`sciverse-relations` | AnySearch 和 Sciverse（实验） | 显式结构化垂直域；Sciverse 覆盖学术文献检索、语义搜索、正文片段和引用关系 |
 | `site_map` | `map` | Tavily | 文档站、产品站、目录型站点结构 |
@@ -149,7 +149,7 @@ Trellis、hooks、agents 或 commands。
 | --- | --- |
 | `main_search` | xAI Responses -> OpenAI-compatible |
 | `docs_search` | Context7 只在库主体命中候选 title/id 时使用；低置信度或空 Context7 命中后由 Exa 同能力兜底，并处理官方域名、论文、产品页、可信站点发现 |
-| `web_search` | 智谱 Web Search API -> 智谱 Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
+| `web_search` | 豆包搜索 -> 智谱 Web Search API -> 智谱 Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
 | `web_fetch` | Tavily -> 带 `JINA_API_KEY` 的 Jina Reader -> 智谱 Coding Plan MCP `webReader` -> Firecrawl |
 
 AnySearch 和 Sciverse 当前都只作为实验 `vertical_search` 暴露，不进入 `web_search` 兜底链，也不是 `standard` 最低配置要求。Sciverse 也不是 `docs_search`，不会加入默认 `search` / `research` 路由；需要学术字段、语义论文命中、正文片段或引用/参考文献关系时，请显式运行 `sciverse-*` 命令。
@@ -174,7 +174,7 @@ Jina Reader 只属于 `web_fetch`，不是通用搜索 provider。只有配置 `
 
 `extra_sources` 只是候选来源，不等于自动事实校验。新闻、政策、财经、医疗、严肃评测、工具选型等高风险问题，建议先发现来源，再 `fetch` 关键网页正文，最后只基于抓到的正文写结论。
 
-搜索引擎选择速记：先用 `search` 做宽泛探索和综合；想让 CLI 执行完整证据流时用 `research`；中文、国内、政策、公告、当前新闻优先补 `zhipu-search`；只有明确要用 Coding Plan 额度时才走 `zhipu-mcp-*`；库/API/框架文档优先用 Context7；官方域名、论文、产品页、可信站点和低噪声发现再用 Exa；Tavily/Firecrawl 通过 `search --extra-sources` 做横向候选，通过 `fetch` 做正文证据；Jina 用于已知 URL 正文抓取；AnySearch 只在明确要实验性垂直搜索时使用；Sciverse 只在明确要学术 catalog/search/semantic/read/relations 时使用。
+搜索引擎选择速记：先用 `search` 做宽泛探索和综合；想让 CLI 执行完整证据流时用 `research`；中文、国内、政策、公告、当前新闻优先补 `doubao-search` 或 `zhipu-search`；只有明确要用 Coding Plan 额度时才走 `zhipu-mcp-*`；库/API/框架文档优先用 Context7；官方域名、论文、产品页、可信站点和低噪声发现再用 Exa；Tavily/Firecrawl 通过 `search --extra-sources` 做横向候选，通过 `fetch` 做正文证据；Jina 用于已知 URL 正文抓取；AnySearch 只在明确要实验性垂直搜索时使用；Sciverse 只在明确要学术 catalog/search/semantic/read/relations 时使用。
 
 ## Deep Research 深度搜索
 
@@ -207,7 +207,7 @@ Deep Research 不是固定题材配方。行情、选型、技术文档、新闻
 Deep Research 只允许组合现有 CLI 积木：
 
 ```text
-search, exa-search, exa-similar, zhipu-search, context7-library, context7-docs, fetch, map
+search, exa-search, exa-similar, zhipu-search, doubao-search, context7-library, context7-docs, fetch, map
 ```
 
 `doctor` 是 preflight 配置预检，不是 research step。`smart-search deep` 这一步本身是离线 planner；后续执行计划里的 `steps[].command` 时才会联网。
@@ -260,6 +260,7 @@ smart-search deep "https://example.com/source" --format json
 | Exa | 官方文档、API、论文、产品页、可信网页的低噪声发现 | `EXA_API_KEY` | [Exa docs](https://docs.exa.ai/) | [Exa API keys](https://dashboard.exa.ai/api-keys) |
 | Context7 | SDK、库、框架、API 文档兜底 | `CONTEXT7_API_KEY`、`CONTEXT7_BASE_URL` | [Context7 docs](https://context7.com/docs) | [Context7](https://context7.com/) |
 | 智谱 Web Search API | 中文、国内、时效、域名过滤类来源发现 | `ZHIPU_API_KEY`、`ZHIPU_API_URL`、`ZHIPU_SEARCH_ENGINE` | [智谱联网搜索文档](https://docs.bigmodel.cn/cn/guide/tools/web-search) | [智谱 API keys](https://open.bigmodel.cn/usercenter/apikeys) |
+| 豆包搜索（Search Infinity） | 中文、国内、时效来源发现，走字节搜索索引 | `DOUBAO_SEARCH_API_KEY`、`DOUBAO_SEARCH_API_URL` | [豆包搜索 Custom 版](https://www.volcengine.com/docs/87772/2272953) | [联网搜索 API Key](https://console.volcengine.com/search-infinity/api-key) |
 | 智谱 Coding Plan Remote MCP | 使用 Coding Plan 额度做联网搜索、网页读取、开源仓库发现 | `ZHIPU_MCP_API_KEY`、`ZHIPU_MCP_SEARCH_API_URL`、`ZHIPU_MCP_READER_API_URL`、`ZHIPU_MCP_ZREAD_API_URL` | [联网搜索 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/search-mcp-server)、[网页读取 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/reader-mcp-server)、[zread MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server) | [智谱 API keys](https://open.bigmodel.cn/usercenter/apikeys) |
 | Tavily | 额外来源、URL fetch、站点 map | `TAVILY_API_URL`、`TAVILY_API_KEY`、`TAVILY_ENABLED` | [Tavily docs](https://docs.tavily.com/) | [Tavily app](https://app.tavily.com/home) |
 | Jina Reader | 已知 URL 正文抓取；满足 standard 最低配置必须有 key | `JINA_API_KEY`、`JINA_READER_API_URL`、`JINA_RESPOND_WITH`、`JINA_TIMEOUT_SECONDS` | [Jina Reader](https://jina.ai/reader/) | [Jina AI](https://jina.ai/) |
@@ -301,6 +302,7 @@ smart-search route-calibrate --models "Qwen/Qwen3-Embedding-8B" --format markdow
 - 旧的 `SMART_SEARCH_API_URL`、`SMART_SEARCH_API_KEY`、`SMART_SEARCH_API_MODE`、`SMART_SEARCH_MODEL`、`SMART_SEARCH_XAI_TOOLS` 不再是受支持配置项。请显式使用 `XAI_*` 或 `OPENAI_COMPATIBLE_*`。
 - 不要给 OpenAI-compatible Chat Completions 中转强塞 xAI 的 `web_search` / `x_search` 工具或旧 `search_parameters`。
 - `zhipu-search` 对应的是智谱 Web Search API，不是 Chat Completions `tools=[web_search]`，不是 Search Agent，也不是 MCP Server。
+- `doubao-search` 对应豆包搜索 / Search Infinity REST：`https://open.feedcoopapi.com/search_api/web_search`。它不是方舟 Ark Chat Completions Key，也不是方舟 Responses 联网插件。
 - 智谱 Coding Plan 是单独的 Remote MCP 路线：`web_search_prime` 对应 `web_search`，`webReader` 对应 `web_fetch`，zread 工具对应显式仓库/文档发现命令。它不会混进现有 `/paas/v4/web_search` 智谱 REST provider。
 - 智谱 Coding Plan MCP 需要单独的 Coding Plan 权益。普通 `ZHIPU_API_KEY` 能用 Web Search API，不代表能用 `zhipu-mcp-search` 或 zread。未配置或未授权 `ZHIPU_MCP_API_KEY` 时，Smart Search 会跳过这些 MCP provider；`standard` 最低配置和同 capability 兜底仍会通过已配置的 REST/search/fetch provider 工作。
 - Jina Reader 不是通用搜索 provider。只有配置 `JINA_API_KEY` 后才计入 `standard`；`JINA_RESPOND_WITH=readerlm-v2` 也必须配置 `JINA_API_KEY`。
@@ -336,6 +338,8 @@ smart-search setup --non-interactive `
   --zhipu-key "your-zhipu-key" `
   --zhipu-api-url "https://open.bigmodel.cn/api" `
   --zhipu-search-engine "search_pro_sogou" `
+  --doubao-key "your-doubao-search-key" `
+  --doubao-api-url "https://open.feedcoopapi.com" `
   --zhipu-mcp-key "your-zhipu-coding-plan-key" `
   --jina-key "your-jina-key" `
   --tavily-api-url "https://api.tavily.com" `
@@ -417,6 +421,9 @@ smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --p
 | `ZHIPU_API_KEY` | 智谱 Web Search key |
 | `ZHIPU_API_URL` | 智谱 API 地址，默认 `https://open.bigmodel.cn/api` |
 | `ZHIPU_SEARCH_ENGINE` | 智谱搜索服务，例如 `search_pro_sogou` |
+| `DOUBAO_SEARCH_API_KEY` | 豆包搜索 / Search Infinity key，不是方舟 Ark key |
+| `DOUBAO_SEARCH_API_URL` | 豆包搜索 API 地址，默认 `https://open.feedcoopapi.com` |
+| `DOUBAO_SEARCH_TIMEOUT_SECONDS` | 豆包搜索超时，默认 `30` |
 | `ZHIPU_MCP_API_KEY` | 智谱 Coding Plan Remote MCP key |
 | `ZHIPU_MCP_SEARCH_API_URL` | 智谱 Coding Plan 联网搜索 MCP endpoint |
 | `ZHIPU_MCP_READER_API_URL` | 智谱 Coding Plan 网页读取 MCP endpoint |
@@ -451,6 +458,7 @@ smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --p
 | `exa-search` | `exa`、`x` | Exa 来源发现 |
 | `exa-similar` | `xs` | 从一个 URL 找相似页面 |
 | `zhipu-search` | `z`、`zp` | 智谱 Web Search API |
+| `doubao-search` | `dd`、`volc-search` | 豆包搜索 / Search Infinity |
 | `zhipu-mcp-search` | `zmcp-search` | 智谱 Coding Plan MCP `web_search_prime` |
 | `zhipu-mcp-reader` | `zmcp-reader` | 智谱 Coding Plan MCP `webReader` |
 | `zhipu-mcp-search-doc` | `zmcp-doc` | 通过 zread MCP 搜开源仓库文档 |
@@ -491,6 +499,7 @@ smart-search exa-search "OpenAI Responses API documentation" --include-domains p
 smart-search context7-library "react" "hooks" --format json
 smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search zhipu-search "今天国内 AI 新闻" --search-engine search_pro_sogou --count 5 --format json
+smart-search doubao-search "今天国内 AI 新闻" --count 5 --format json
 smart-search zhipu-mcp-search "今天国内 AI 新闻" --count 5 --format json
 smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
@@ -542,7 +551,7 @@ smart-search fetch "https://example.com/source" --format markdown --output C:\tm
 
 写 claim-level 结论时建议流程：
 
-1. 用 `search`、`exa-search`、`zhipu-search` 或 `exa-similar` 找候选 URL。
+1. 用 `search`、`exa-search`、`zhipu-search`、`doubao-search` 或 `exa-similar` 找候选 URL。
 2. 用 `fetch` 抓关键 URL 正文。
 3. 最终回答只引用 fetch 正文能支撑的事实。
 4. 没有 fetch 的来源标为未验证候选。
@@ -561,7 +570,7 @@ smart-search doctor --format markdown
 
 - 降低 `--extra-sources`；
 - 把大问题拆成多个小问题；
-- 先用 `exa-search` 或 `zhipu-search` 找来源，再 `fetch` 关键网页。
+- 先用 `exa-search`、`zhipu-search` 或 `doubao-search` 找来源，再 `fetch` 关键网页。
 
 如果想确认安装是否正常：
 

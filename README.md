@@ -143,7 +143,7 @@ provider keys or create Trellis/hooks/agents/commands.
 | --- | --- | --- | --- |
 | `main_search` | `search` | xAI Responses, OpenAI-compatible Chat Completions | Broad answer generation and synthesis |
 | `docs_search` | `context7-library`, `context7-docs`, `exa-search` | Context7, Exa | Official docs, SDKs, APIs, framework/library evidence |
-| `web_search` | `zhipu-search`, `zhipu-mcp-search`, intent-routed reinforcement inside `search` | Zhipu Web Search API, Zhipu Coding Plan MCP, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
+| `web_search` | `zhipu-search`, `doubao-search`, `zhipu-mcp-search`, intent-routed reinforcement inside `search` | Zhipu Web Search API, Doubao Search, Zhipu Coding Plan MCP, Tavily, Firecrawl | Chinese, domestic, current, domain-filtered, or supplementary web discovery |
 | `web_fetch` | `fetch`, `zhipu-mcp-reader` | Tavily, Jina Reader, Zhipu Coding Plan MCP Reader, Firecrawl | Exact URL content extraction for evidence |
 | `vertical_search` | `anysearch-domains`, `anysearch-search`, `anysearch-extract`, `anysearch-batch`, `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, `sciverse-relations` | AnySearch and Sciverse (experimental) | Explicit structured vertical domains; Sciverse covers academic literature search, semantic search, content chunks, and citation relations |
 | `site_map` | `map` | Tavily | Site/documentation structure discovery |
@@ -156,7 +156,7 @@ Fallback is same-capability only:
 | --- | --- |
 | `main_search` | xAI Responses -> OpenAI-compatible |
 | `docs_search` | Context7 when a library subject matches a candidate title/id; Exa after an empty or low-confidence Context7 match, and for official domains, papers, product pages, and trusted-site discovery |
-| `web_search` | Zhipu Web Search API -> Zhipu Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
+| `web_search` | Doubao Search -> Zhipu Web Search API -> Zhipu Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
 | `web_fetch` | Tavily -> Jina Reader with `JINA_API_KEY` -> Zhipu Coding Plan MCP `webReader` -> Firecrawl |
 
 AnySearch and Sciverse are intentionally not part of the `web_search` fallback chain and are not required by the `standard` minimum profile. Sciverse is also not a `docs_search` provider and does not join default `search` or `research` routing; use explicit `sciverse-*` commands when you need academic metadata, semantic paper hits, document chunks, or citation/reference relations.
@@ -202,7 +202,7 @@ Deep Research is not a fixed topic recipe system. Market research, product compa
 Allowed planned tools are:
 
 ```text
-search, exa-search, exa-similar, zhipu-search, context7-library, context7-docs, fetch, map
+search, exa-search, exa-similar, zhipu-search, doubao-search, context7-library, context7-docs, fetch, map
 ```
 
 `doctor` is preflight, not a research step. `smart-search deep` itself is offline; live research starts when an agent or user executes `steps[].command`.
@@ -251,6 +251,7 @@ The default interactive setup wizard includes optional smart intent router promp
 | Exa | Low-noise official docs, API, paper, product, trusted-page discovery | `EXA_API_KEY` | [Exa docs](https://docs.exa.ai/) | [Exa API keys](https://dashboard.exa.ai/api-keys) |
 | Context7 | SDK, library, framework, and API documentation fallback | `CONTEXT7_API_KEY`, `CONTEXT7_BASE_URL` | [Context7 docs](https://context7.com/docs) | [Context7](https://context7.com/) |
 | Zhipu Web Search API | Chinese, domestic, current, or domain-filtered web discovery | `ZHIPU_API_KEY`, `ZHIPU_API_URL`, `ZHIPU_SEARCH_ENGINE` | [Zhipu web search docs](https://docs.bigmodel.cn/cn/guide/tools/web-search) | [Zhipu API keys](https://open.bigmodel.cn/usercenter/apikeys) |
+| Doubao Search (Search Infinity) | Chinese, domestic, current web discovery through ByteDance search | `DOUBAO_SEARCH_API_KEY`, `DOUBAO_SEARCH_API_URL` | [Doubao Search Custom API](https://www.volcengine.com/docs/87772/2272953) | [Search Infinity API keys](https://console.volcengine.com/search-infinity/api-key) |
 | Zhipu Coding Plan Remote MCP | Coding Plan quota web search, page reading, and open-source repo discovery | `ZHIPU_MCP_API_KEY`, `ZHIPU_MCP_SEARCH_API_URL`, `ZHIPU_MCP_READER_API_URL`, `ZHIPU_MCP_ZREAD_API_URL` | [search MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/search-mcp-server), [reader MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/reader-mcp-server), [zread MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server) | [Zhipu API keys](https://open.bigmodel.cn/usercenter/apikeys) |
 | Tavily | Extra web sources, URL fetch, and site map | `TAVILY_API_URL`, `TAVILY_API_KEY`, `TAVILY_ENABLED` | [Tavily docs](https://docs.tavily.com/) | [Tavily app](https://app.tavily.com/home) |
 | Jina Reader | Known URL page extraction for `web_fetch`; key required for standard minimum profile | `JINA_API_KEY`, `JINA_READER_API_URL`, `JINA_RESPOND_WITH`, `JINA_TIMEOUT_SECONDS` | [Jina Reader](https://jina.ai/reader/) | [Jina AI](https://jina.ai/) |
@@ -292,6 +293,7 @@ Important boundaries:
 - Legacy `SMART_SEARCH_API_URL`, `SMART_SEARCH_API_KEY`, `SMART_SEARCH_API_MODE`, `SMART_SEARCH_MODEL`, and `SMART_SEARCH_XAI_TOOLS` are not supported config keys. Use `XAI_*` or `OPENAI_COMPATIBLE_*` explicitly.
 - Do not force xAI `web_search` / `x_search` tools or legacy `search_parameters` into the OpenAI-compatible Chat Completions route.
 - `zhipu-search` support is the Web Search API route, not Zhipu Chat Completions `tools=[web_search]`, not Search Agent, and not the MCP Server.
+- `doubao-search` is the Doubao Search / Search Infinity REST route at `https://open.feedcoopapi.com/search_api/web_search`. It is not an Ark chat Completions key and not the Volcengine Responses web_search plugin.
 - Zhipu Coding Plan support is a separate Remote MCP route. `web_search_prime` maps to `web_search`, `webReader` maps to `web_fetch`, and zread tools map to explicit repo/docs discovery commands. It is not mixed into the existing `/paas/v4/web_search` Zhipu REST provider.
 - Zhipu Coding Plan MCP requires its own Coding Plan entitlement. A normal `ZHIPU_API_KEY` for Web Search API does not prove `zhipu-mcp-search` or zread access. If `ZHIPU_MCP_API_KEY` is absent or unauthorized, Smart Search skips those MCP providers; the `standard` minimum profile and same-capability fallback still work through the configured REST/search/fetch providers.
 - Jina Reader is not a general search provider. `JINA_API_KEY` is required for Jina to count toward `standard`; `JINA_RESPOND_WITH=readerlm-v2` also requires `JINA_API_KEY`.
@@ -327,6 +329,8 @@ smart-search setup --non-interactive `
   --zhipu-key "your-zhipu-key" `
   --zhipu-api-url "https://open.bigmodel.cn/api" `
   --zhipu-search-engine "search_pro_sogou" `
+  --doubao-key "your-doubao-search-key" `
+  --doubao-api-url "https://open.feedcoopapi.com" `
   --zhipu-mcp-key "your-zhipu-coding-plan-key" `
   --jina-key "your-jina-key" `
   --tavily-api-url "https://api.tavily.com" `
@@ -397,6 +401,7 @@ Provider timeouts:
 | `exa-search` | `exa`, `x` | Exa source discovery |
 | `exa-similar` | `xs` | Similar pages from one URL |
 | `zhipu-search` | `z`, `zp` | Zhipu Web Search API |
+| `doubao-search` | `dd`, `volc-search` | Doubao Search / Search Infinity |
 | `zhipu-mcp-search` | `zmcp-search` | Zhipu Coding Plan MCP `web_search_prime` |
 | `zhipu-mcp-reader` | `zmcp-reader` | Zhipu Coding Plan MCP `webReader` |
 | `zhipu-mcp-search-doc` | `zmcp-doc` | Search open-source repository docs through zread MCP |
@@ -439,6 +444,7 @@ smart-search exa-search "OpenAI Responses API documentation" --include-domains p
 smart-search context7-library "react" "hooks" --format json
 smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search zhipu-search "today China AI news" --search-engine search_pro_sogou --count 5 --format json
+smart-search doubao-search "today China AI news" --count 5 --format json
 smart-search zhipu-mcp-search "today China AI news" --count 5 --format json
 smart-search zhipu-mcp-reader "https://example.com/source" --format json
 smart-search zhipu-mcp-search-doc "owner/repo" "install" --format json
@@ -492,7 +498,7 @@ smart-search fetch "https://example.com/source" --format markdown --output C:\tm
 
 For claim-level evidence:
 
-1. Discover candidate URLs with `search`, `exa-search`, `zhipu-search`, or `exa-similar`.
+1. Discover candidate URLs with `search`, `exa-search`, `zhipu-search`, `doubao-search`, or `exa-similar`.
 2. Fetch exact URLs with `fetch`.
 3. Cite fetched text in the final answer.
 4. Unsupported key claims must be fetched or downgraded to unverified candidates.
@@ -520,7 +526,7 @@ If search is slow:
 
 - reduce `--extra-sources`;
 - split broad questions into smaller queries;
-- use `exa-search` or `zhipu-search` for source discovery, then `fetch` key pages.
+- use `exa-search`, `zhipu-search`, or `doubao-search` for source discovery, then `fetch` key pages.
 
 If installed CLI health is uncertain:
 

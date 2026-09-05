@@ -59,6 +59,9 @@ class Config:
         "ZHIPU_API_URL",
         "ZHIPU_SEARCH_ENGINE",
         "ZHIPU_TIMEOUT_SECONDS",
+        "DOUBAO_SEARCH_API_KEY",
+        "DOUBAO_SEARCH_API_URL",
+        "DOUBAO_SEARCH_TIMEOUT_SECONDS",
         "ZHIPU_MCP_API_KEY",
         "ZHIPU_MCP_SEARCH_API_URL",
         "ZHIPU_MCP_READER_API_URL",
@@ -651,6 +654,18 @@ class Config:
         return float(self._get_config_value("ZHIPU_TIMEOUT_SECONDS", "30") or "30")
 
     @property
+    def doubao_search_api_key(self) -> str | None:
+        return self._get_config_value("DOUBAO_SEARCH_API_KEY")
+
+    @property
+    def doubao_search_api_url(self) -> str:
+        return self._get_config_value("DOUBAO_SEARCH_API_URL", "https://open.feedcoopapi.com") or "https://open.feedcoopapi.com"
+
+    @property
+    def doubao_search_timeout(self) -> float:
+        return float(self._get_config_value("DOUBAO_SEARCH_TIMEOUT_SECONDS", "30") or "30")
+
+    @property
     def zhipu_mcp_api_key(self) -> str | None:
         return self._get_config_value("ZHIPU_MCP_API_KEY")
 
@@ -814,6 +829,9 @@ class Config:
             "ZHIPU_API_URL": self.zhipu_api_url,
             "ZHIPU_SEARCH_ENGINE": self.zhipu_search_engine,
             "ZHIPU_TIMEOUT_SECONDS": self.zhipu_timeout,
+            "DOUBAO_SEARCH_API_KEY": self._mask_api_key(self.doubao_search_api_key) if self.doubao_search_api_key else "未配置",
+            "DOUBAO_SEARCH_API_URL": self.doubao_search_api_url,
+            "DOUBAO_SEARCH_TIMEOUT_SECONDS": self.doubao_search_timeout,
             "ZHIPU_MCP_API_KEY": self._mask_api_key(self.zhipu_mcp_api_key) if self.zhipu_mcp_api_key else "未配置",
             "ZHIPU_MCP_SEARCH_API_URL": self.zhipu_mcp_search_api_url,
             "ZHIPU_MCP_READER_API_URL": self.zhipu_mcp_reader_api_url,

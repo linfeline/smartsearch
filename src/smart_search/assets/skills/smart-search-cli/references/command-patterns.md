@@ -14,7 +14,7 @@ For multi-source research, use `--output` to save evidence with a descriptive ti
 
 For claim-level evidence, prefer this order:
 
-1. Discover candidate URLs with source-focused `search`, `zhipu-search` for Chinese/current/domestic topics, Context7 for docs/API/library topics, or `exa-search` for official/trusted domains and papers.
+1. Discover candidate URLs with source-focused `search`, `zhipu-search` or `doubao-search` for Chinese/current/domestic topics, Context7 for docs/API/library topics, or `exa-search` for official/trusted domains and papers.
 2. Fetch the exact pages that matter.
 3. Use broad `search` only as synthesis or discovery, and mark claims as unverified when only `extra_sources` are available.
 
@@ -34,6 +34,7 @@ smart-search exa-similar "https://example.com/article" --num-results 5 --format 
 smart-search context7-library "react" "hooks" --format json
 smart-search context7-docs "/reactjs/react.dev" "useEffect cleanup" --format json
 smart-search zhipu-search "today China AI news" --count 5 --format json
+smart-search doubao-search "today China AI news" --count 5 --format json
 smart-search anysearch-domains security --format json
 smart-search anysearch-search "CVE-2024-3094" --domain security --sub-domain vuln --param type=cve --param value=CVE-2024-3094 --max-results 3 --format json
 smart-search anysearch-search "CVE-2024-3094" --domain security.cve --sub-domain-params '{"type":"legacy","value":"old"}' --param type=cve --param value=CVE-2024-3094 --format json
@@ -57,6 +58,7 @@ smart-search skills update --targets codex --format json
 smart-search skills update --all --format json
 smart-search route "React useEffect API docs" --format markdown
 smart-search setup --non-interactive --zhipu-api-url "https://open.bigmodel.cn/api" --zhipu-search-engine "search_std"
+smart-search setup --non-interactive --doubao-key "key" --doubao-api-url "https://open.feedcoopapi.com"
 smart-search setup --non-interactive --openai-compatible-stream true
 smart-search setup --non-interactive --openai-compatible-fallback-models "model-a,model-b"
 smart-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "key"

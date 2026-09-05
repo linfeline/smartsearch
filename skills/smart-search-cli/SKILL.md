@@ -34,6 +34,7 @@ Use the local `smart-search` command as the default execution layer for web rese
 - `research`: live Deep Research executor for end-to-end plan, discovery, fetch/read, gap check, and evidence-only synthesis.
 - `deep`: offline Deep Research planner; it does not run providers, fetch pages, or replace default `search`.
 - `zhipu-search`: Chinese-language, domestic China, policy/regulatory, announcements, current news, or China-local source discovery.
+- `doubao-search`: ByteDance Doubao Search (Volcengine Search Infinity) for the same Chinese/domestic/current source discovery; uses `DOUBAO_SEARCH_API_KEY`, not an Ark key.
 - `context7-library` / `context7-docs`: library, SDK, API, framework, or documentation intent. Automatic routes select Context7 only when a query subject overlaps a candidate title/id; otherwise use same-capability Exa fallback. Explicit commands retain the candidate list and supplied library id.
 - `exa-search`: official domains, papers, product pages, trusted pages, date/domain-filtered low-noise discovery, and adjacent source discovery through `exa-similar`.
 - `fetch`: user-provided URLs or any claim that depends on page content.

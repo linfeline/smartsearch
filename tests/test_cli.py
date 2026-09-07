@@ -1595,6 +1595,18 @@ def test_setup_status_counts_keyless_keenable_only_when_enabled():
     assert "keenable" not in disabled["web_search"]["configured"]
 
 
+def test_optional_enhancements_can_disable_existing_keenable(monkeypatch):
+    values = {}
+    current = {"KEENABLE_ENABLED": "true", "KEENABLE_API_KEY": "keen-test-secret"}
+
+    monkeypatch.setattr(cli, "_prompt_provider_multi_select", lambda *args, **kwargs: [])
+    monkeypatch.setattr(cli, "_prompt_yes_no", lambda *args, **kwargs: False)
+
+    cli._prompt_optional_enhancements(values, current, "en")
+
+    assert values["KEENABLE_ENABLED"] == "false"
+
+
 def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     saved = {}
 

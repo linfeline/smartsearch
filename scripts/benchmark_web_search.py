@@ -32,19 +32,28 @@ CASES = [
     ("GitHub Actions OIDC AWS official documentation", ["docs.github.com", "aws.amazon.com"]),
 ]
 
+URL_HINTS = {
+    "uv Python package manager GitHub repository": ["github.com/astral-sh/uv"],
+    "vLLM GitHub repository official": ["github.com/vllm-project/vllm"],
+    "Model Context Protocol Python SDK GitHub": ["github.com/modelcontextprotocol/python-sdk"],
+}
+
 
 def _host(url: str) -> str:
     return (urlparse(url).hostname or "").lower().removeprefix("www.")
 
 
-def _matches(url: str, expected_domains: list[str]) -> bool:
+def _matches(url: str, expected_domains: list[str], url_hints: list[str] | None = None) -> bool:
+    normalized_url = url.lower().rstrip("/")
+    if url_hints:
+        return any(hint.lower().rstrip("/") in normalized_url for hint in url_hints)
     host = _host(url)
     return any(host == domain or host.endswith(f".{domain}") for domain in expected_domains)
 
 
-def _score(results: list[dict], expected_domains: list[str]) -> dict:
+def _score(results: list[dict], expected_domains: list[str], url_hints: list[str] | None = None) -> dict:
     urls = [str(item.get("url") or "") for item in results if item.get("url")][:5]
-    rank = next((index for index, url in enumerate(urls, 1) if _matches(url, expected_domains)), 0)
+    rank = next((index for index, url in enumerate(urls, 1) if _matches(url, expected_domains, url_hints)), 0)
     return {
         "hit_at_5": bool(rank),
         "rank": rank,
@@ -105,7 +114,7 @@ def _summary(rows: list[dict], provider: str) -> dict:
     }
 
 
-async def run(count: int) -> dict:
+async def _run_once(count: int, run_number: int) -> list[dict]:
     rows = []
     for query, expected_domains in CASES:
         tavily_result, keenable_result = await asyncio.gather(
@@ -114,36 +123,59 @@ async def run(count: int) -> dict:
         )
         tavily_results, tavily_ms, tavily_error = tavily_result
         keenable_results, keenable_ms, keenable_error = keenable_result
-        tavily_score = _score(tavily_results, expected_domains)
-        keenable_score = _score(keenable_results, expected_domains)
+        url_hints = URL_HINTS.get(query)
+        tavily_score = _score(tavily_results, expected_domains, url_hints)
+        keenable_score = _score(keenable_results, expected_domains, url_hints)
         overlap = len(set(tavily_score["urls"]) & set(keenable_score["urls"]))
         rows.append(
             {
+                "run": run_number,
                 "query": query,
                 "expected_domains": expected_domains,
+                "expected_url_hints": url_hints or [],
                 "tavily": {**tavily_score, "elapsed_ms": round(tavily_ms, 2), "error": tavily_error},
                 "keenable": {**keenable_score, "elapsed_ms": round(keenable_ms, 2), "error": keenable_error},
                 "top5_url_overlap": overlap,
             }
         )
+    return rows
+
+
+async def run(count: int, runs: int = 3) -> dict:
+    all_rows: list[dict] = []
+    per_run: list[dict] = []
+    for run_number in range(1, runs + 1):
+        rows = await _run_once(count, run_number)
+        all_rows.extend(rows)
+        per_run.append(
+            {
+                "run": run_number,
+                "tavily": _summary(rows, "tavily"),
+                "keenable": _summary(rows, "keenable"),
+                "mean_top5_url_overlap": round(statistics.mean(row["top5_url_overlap"] for row in rows), 2),
+            }
+        )
     summary = {
-        "tavily": _summary(rows, "tavily"),
-        "keenable": _summary(rows, "keenable"),
-        "mean_top5_url_overlap": round(statistics.mean(row["top5_url_overlap"] for row in rows), 2),
-        "cases": len(rows),
+        "tavily": _summary(all_rows, "tavily"),
+        "keenable": _summary(all_rows, "keenable"),
+        "mean_top5_url_overlap": round(statistics.mean(row["top5_url_overlap"] for row in all_rows), 2),
+        "queries_per_run": len(CASES),
+        "runs": runs,
+        "total_cases": len(all_rows),
         "count_per_provider": count,
         "tavily_search_depth": "advanced",
         "keenable_search": "default REST search",
     }
-    return {"summary": summary, "cases": rows}
+    return {"summary": summary, "per_run": per_run, "cases": all_rows}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="A/B benchmark Tavily Advanced vs Keenable Search on global web-search cases.")
     parser.add_argument("--count", type=int, default=10)
+    parser.add_argument("--runs", type=int, default=3, help="Repeat the full query set this many times (default: 3).")
     parser.add_argument("--summary", action="store_true", help="Print only the aggregate summary.")
     args = parser.parse_args()
-    result = asyncio.run(run(max(5, args.count)))
+    result = asyncio.run(run(max(5, args.count), max(1, args.runs)))
     print(json.dumps(result["summary"] if args.summary else result, ensure_ascii=False, indent=2))
 
 

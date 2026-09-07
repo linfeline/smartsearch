@@ -2239,6 +2239,8 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         default_selected,
         lang,
     )
+    if "keenable" not in selected and "keenable" in default_selected:
+        values["KEENABLE_ENABLED"] = "false"
     if "doubao" in selected:
         values["DOUBAO_SEARCH_API_KEY"] = _prompt_value(
             "DOUBAO_SEARCH_API_KEY",

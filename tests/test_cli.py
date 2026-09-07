@@ -1587,6 +1587,14 @@ def test_skills_unknown_target_returns_parameter_error(tmp_path, capsys):
     assert not (tmp_path / ".codex" / "skills" / "smart-search-cli").exists()
 
 
+def test_setup_status_counts_keyless_keenable_only_when_enabled():
+    enabled = cli._setup_status_from_values({"KEENABLE_ENABLED": "true"})
+    disabled = cli._setup_status_from_values({"KEENABLE_ENABLED": "false"})
+
+    assert "keenable" in enabled["web_search"]["configured"]
+    assert "keenable" not in disabled["web_search"]["configured"]
+
+
 def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     saved = {}
 
@@ -1676,6 +1684,16 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "pool.example.com",
         "--tavily-key",
         "th-test-secret",
+        "--keenable-enabled",
+        "true",
+        "--keenable-api-url",
+        "api.keenable.ai/v1/search",
+        "--keenable-key",
+        "keen-test-secret",
+        "--keenable-timeout",
+        "12",
+        "--keenable-title",
+        "smart-search-test",
         "--firecrawl-api-url",
         "firecrawl.example.com/v2",
         "--firecrawl-key",
@@ -1734,6 +1752,11 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["CONTEXT7_API_KEY"] == "ctx-secret"
     assert saved["TAVILY_API_URL"] == "https://pool.example.com/api/tavily"
     assert saved["TAVILY_API_KEY"] == "th-test-secret"
+    assert saved["KEENABLE_ENABLED"] == "true"
+    assert saved["KEENABLE_API_URL"] == "https://api.keenable.ai/v1/search"
+    assert saved["KEENABLE_API_KEY"] == "keen-test-secret"
+    assert saved["KEENABLE_TIMEOUT_SECONDS"] == "12"
+    assert saved["KEENABLE_TITLE"] == "smart-search-test"
     assert saved["FIRECRAWL_API_URL"] == "https://firecrawl.example.com/v2"
     assert saved["FIRECRAWL_API_KEY"] == "firecrawl-secret"
     assert saved["ANYSEARCH_API_URL"] == "https://anysearch.example.com/mcp"
@@ -1744,6 +1767,7 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["SCIVERSE_TIMEOUT_SECONDS"] == "11"
     assert "xai-test-secret" not in out
     assert "th-test-secret" not in out
+    assert "keen-test-secret" not in out
     assert "jina-secret" not in out
     assert "zmcp-secret" not in out
     assert "as-test-secret" not in out

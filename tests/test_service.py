@@ -824,11 +824,23 @@ def test_research_router_uses_doubao_before_zhipu_for_chinese_current(monkeypatc
     _configure_research_minimum(monkeypatch)
     monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-secret")
     monkeypatch.setenv("DOUBAO_SEARCH_API_KEY", "doubao-secret")
+    monkeypatch.setenv("KEENABLE_ENABLED", "true")
 
     routes = service._research_capability_routes("今天国内 AI 政策最新公告", _research_plan("今天国内 AI 政策最新公告"), "auto")
 
     assert routes["signals"]["current_or_locale_intent"] is True
-    assert routes["capabilities"]["web_search"]["providers"][:2] == ["doubao", "zhipu"]
+    assert routes["capabilities"]["web_search"]["providers"][:4] == ["doubao", "zhipu", "keenable", "tavily"]
+
+
+def test_research_router_prefers_keenable_for_broad_web_search(monkeypatch):
+    _configure_research_minimum(monkeypatch)
+    monkeypatch.setenv("KEENABLE_ENABLED", "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+
+    routes = service._research_capability_routes("global web search benchmark providers", _research_plan("global web search benchmark providers"), "auto")
+
+    assert routes["signals"]["current_or_locale_intent"] is False
+    assert routes["capabilities"]["web_search"]["providers"][:2] == ["keenable", "tavily"]
 
 
 def test_research_router_favors_jina_for_known_url_pdf_and_firecrawl_for_dynamic(monkeypatch):
@@ -1759,7 +1771,7 @@ def test_zhipu_mcp_key_satisfies_web_search_and_reader_fetch_as_separate_provide
     assert result["ok"] is True
     assert result["missing"] == []
     assert result["capability_status"]["web_search"]["configured"] == ["zhipu-mcp"]
-    assert result["capability_status"]["web_search"]["fallback_chain"] == ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"]
+    assert result["capability_status"]["web_search"]["fallback_chain"] == ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
     assert result["capability_status"]["web_fetch"]["configured"] == ["zhipu-mcp-reader"]
 
 
@@ -3249,6 +3261,59 @@ async def test_tavily_and_firecrawl_exceptions_are_error_attempts_while_empty_is
         ("tavily", "error", "auth_error"),
         ("firecrawl", "empty", ""),
     ]
+
+
+@pytest.mark.asyncio
+async def test_web_search_provider_filter_preserves_broad_requested_order(monkeypatch):
+    monkeypatch.setenv("KEENABLE_ENABLED", "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def empty_keenable(query, count=10):
+        return {"ok": True, "results": []}
+
+    async def tavily_result(query, max_results=6):
+        return [{"title": "Tavily", "url": "https://example.com", "content": "ok"}]
+
+    monkeypatch.setattr(service, "keenable_search", empty_keenable)
+    monkeypatch.setattr(service, "call_tavily_search", tavily_result)
+
+    sources, attempts = await service._run_web_search_fallback("query", providers="keenable,tavily")
+
+    assert sources[0]["provider"] == "tavily"
+    assert [attempt["provider"] for attempt in attempts] == ["keenable", "tavily"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_provider_filter_preserves_chinese_requested_order(monkeypatch):
+    monkeypatch.setenv("DOUBAO_SEARCH_API_KEY", "doubao-test-secret")
+    monkeypatch.setenv("ZHIPU_API_KEY", "zhipu-test-secret")
+    monkeypatch.setenv("KEENABLE_ENABLED", "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def empty_doubao(query, count=5):
+        return {"ok": True, "results": []}
+
+    async def empty_zhipu(query, count=5):
+        return {"ok": True, "results": []}
+
+    async def keenable_result(query, count=10):
+        return {"ok": True, "results": [{"title": "K", "url": "https://example.com", "description": "ok"}]}
+
+    async def unexpected_tavily(query, max_results=6):
+        raise AssertionError("Tavily should not run after Keenable succeeds")
+
+    monkeypatch.setattr(service, "doubao_search", empty_doubao)
+    monkeypatch.setattr(service, "zhipu_search", empty_zhipu)
+    monkeypatch.setattr(service, "keenable_search", keenable_result)
+    monkeypatch.setattr(service, "call_tavily_search", unexpected_tavily)
+
+    sources, attempts = await service._run_web_search_fallback(
+        "query",
+        providers="doubao,zhipu,keenable,tavily",
+    )
+
+    assert sources[0]["provider"] == "keenable"
+    assert [attempt["provider"] for attempt in attempts] == ["doubao", "zhipu", "keenable"]
 
 
 @pytest.mark.asyncio

@@ -468,6 +468,7 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
     provider_tests = [
         ("exa", data.get("exa_connection_test") or {}),
         ("tavily", data.get("tavily_connection_test") or {}),
+        ("keenable", data.get("keenable_connection_test") or {}),
         ("jina", data.get("jina_connection_test") or {}),
         ("firecrawl", data.get("firecrawl_connection_test") or {}),
         ("zhipu", data.get("zhipu_connection_test") or {}),
@@ -1378,6 +1379,7 @@ def _display_provider(provider: str, lang: str) -> str:
         "context7": "Context7",
         "jina": "Jina Reader",
         "tavily": "Tavily",
+        "keenable": "Keenable",
         "firecrawl": "Firecrawl",
         "anysearch": "AnySearch",
         "sciverse": "Sciverse",
@@ -1544,6 +1546,12 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
     def has(key: str) -> bool:
         return bool(values.get(key))
 
+    def enabled(key: str, default: bool = False) -> bool:
+        raw = values.get(key)
+        if raw is None or str(raw).strip() == "":
+            return default
+        return str(raw).strip().lower() in {"true", "1", "yes"}
+
     main_configured: set[str] = set()
     if has("XAI_API_KEY"):
         main_configured.add("xai-responses")
@@ -1562,6 +1570,7 @@ def _setup_status_from_values(values: dict[str, str]) -> dict[str, Any]:
                     ("doubao", has("DOUBAO_SEARCH_API_KEY")),
                     ("zhipu", has("ZHIPU_API_KEY")),
                     ("zhipu-mcp", has("ZHIPU_MCP_API_KEY")),
+                    ("keenable", enabled("KEENABLE_ENABLED")),
                     ("tavily", has("TAVILY_API_KEY")),
                     ("firecrawl", has("FIRECRAWL_API_KEY")),
                 ]
@@ -2213,8 +2222,8 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
     _write_stderr(
         _t(
             lang,
-            "\n[可选增强] web_search 网页补强\n用途: 中文、国内、时效、域名过滤类来源检索。\n推荐: 中文场景建议配置豆包搜索或智谱。\n",
-            "\n[Optional] web_search web reinforcement\nPurpose: Chinese, domestic, current, or domain-filtered source discovery.\nRecommended: configure Doubao Search or Zhipu for Chinese/current scenarios.\n",
+            "\n[可选增强] web_search 网页补强\n用途: 中文、国内、时效、域名过滤及全球通用来源检索。\n推荐: 中文场景配置豆包/智谱；全球 broad search 可启用 Keenable。\n",
+            "\n[Optional] web_search web reinforcement\nPurpose: Chinese/domestic/current/domain-filtered and broad global source discovery.\nRecommended: Doubao/Zhipu for Chinese/current; enable Keenable for broad global search.\n",
         )
     )
     default_selected = []
@@ -2222,9 +2231,11 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         default_selected.append("doubao")
     if current.get("ZHIPU_API_KEY"):
         default_selected.append("zhipu")
+    if str(current.get("KEENABLE_ENABLED", "")).strip().lower() in {"true", "1", "yes"}:
+        default_selected.append("keenable")
     selected = _prompt_provider_multi_select(
         _t(lang, "选择可选 web_search 增强", "Choose optional web_search reinforcement"),
-        ["doubao", "zhipu"],
+        ["doubao", "zhipu", "keenable"],
         default_selected,
         lang,
     )
@@ -2240,6 +2251,30 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         values["ZHIPU_API_KEY"] = _prompt_value("ZHIPU_API_KEY", "Zhipu API key", current.get("ZHIPU_API_KEY", ""), lang=lang)
         _prompt_zhipu_api_url(values, current, lang)
         _prompt_zhipu_search_engine(values, current, lang)
+    if "keenable" in selected:
+        values["KEENABLE_ENABLED"] = "true"
+        values["KEENABLE_API_KEY"] = _prompt_value(
+            "KEENABLE_API_KEY",
+            "Keenable API key",
+            current.get("KEENABLE_API_KEY", ""),
+            optional=True,
+            lang=lang,
+        )
+        api_url = _prompt_value(
+            "KEENABLE_API_URL",
+            "Keenable Search API URL",
+            current.get("KEENABLE_API_URL", "https://api.keenable.ai/v1/search"),
+            optional=True,
+            lang=lang,
+        )
+        values["KEENABLE_API_URL"] = _normalize_custom_base_url(api_url)
+        values["KEENABLE_TITLE"] = _prompt_value(
+            "KEENABLE_TITLE",
+            "Keenable public app title",
+            current.get("KEENABLE_TITLE", "smart-search"),
+            optional=True,
+            lang=lang,
+        )
     if _prompt_yes_no(_t(lang, "是否调整验证/兜底默认值?", "Adjust validation/fallback defaults?"), default=False):
         values["SMART_SEARCH_VALIDATION_LEVEL"] = _prompt_value(
             "SMART_SEARCH_VALIDATION_LEVEL",
@@ -2519,6 +2554,11 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("JINA_TIMEOUT_SECONDS", "Jina timeout seconds", True),
         ("TAVILY_API_URL", "Tavily API URL", True),
         ("TAVILY_API_KEY", "Tavily API key", True),
+        ("KEENABLE_ENABLED", "Keenable enabled (true/false)", True),
+        ("KEENABLE_API_URL", "Keenable Search API URL", True),
+        ("KEENABLE_API_KEY", "Keenable API key (optional; public endpoint works without one)", True),
+        ("KEENABLE_TIMEOUT_SECONDS", "Keenable timeout seconds", True),
+        ("KEENABLE_TITLE", "Keenable public app title", True),
         ("FIRECRAWL_API_URL", "Firecrawl API URL", True),
         ("FIRECRAWL_API_KEY", "Firecrawl API key", True),
         ("ANYSEARCH_API_URL", "AnySearch MCP API URL", True),
@@ -2534,6 +2574,8 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         value = _prompt_value(key, label, current.get(key, ""), optional=optional, lang=lang)
         if key == "TAVILY_API_URL":
             value = _normalize_tavily_api_url(value)
+        elif key == "KEENABLE_API_URL":
+            value = _normalize_custom_base_url(value)
         elif key == "FIRECRAWL_API_URL":
             value = _normalize_firecrawl_api_url(value)
         elif key == "ZHIPU_API_URL":
@@ -2872,6 +2914,11 @@ def _run_setup(args: argparse.Namespace) -> int:
         "JINA_TIMEOUT_SECONDS": args.jina_timeout,
         "TAVILY_API_URL": _normalize_tavily_flag_api_url(args.tavily_api_url, args.tavily_key),
         "TAVILY_API_KEY": args.tavily_key,
+        "KEENABLE_ENABLED": args.keenable_enabled,
+        "KEENABLE_API_URL": _normalize_custom_base_url(args.keenable_api_url),
+        "KEENABLE_API_KEY": args.keenable_key,
+        "KEENABLE_TIMEOUT_SECONDS": args.keenable_timeout,
+        "KEENABLE_TITLE": args.keenable_title,
         "FIRECRAWL_API_URL": _normalize_firecrawl_api_url(args.firecrawl_api_url),
         "FIRECRAWL_API_KEY": args.firecrawl_key,
         "ANYSEARCH_API_URL": _normalize_custom_base_url(args.anysearch_api_url),
@@ -3500,6 +3547,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--jina-timeout", default="", help="Save JINA_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--tavily-api-url", default="", help="Save TAVILY_API_URL.")
     setup_parser.add_argument("--tavily-key", default="", help="Save TAVILY_API_KEY.")
+    setup_parser.add_argument("--keenable-enabled", default="", help="Save KEENABLE_ENABLED (true/false).")
+    setup_parser.add_argument("--keenable-api-url", default="", help="Save KEENABLE_API_URL.")
+    setup_parser.add_argument("--keenable-key", default="", help="Save KEENABLE_API_KEY.")
+    setup_parser.add_argument("--keenable-timeout", default="", help="Save KEENABLE_TIMEOUT_SECONDS.")
+    setup_parser.add_argument("--keenable-title", default="", help="Save KEENABLE_TITLE.")
     setup_parser.add_argument("--firecrawl-api-url", default="", help="Save FIRECRAWL_API_URL.")
     setup_parser.add_argument("--firecrawl-key", default="", help="Save FIRECRAWL_API_KEY.")
     setup_parser.add_argument("--anysearch-api-url", default="", help="Save ANYSEARCH_API_URL.")

@@ -81,6 +81,11 @@ class Config:
         "TAVILY_API_URL",
         "TAVILY_ENABLED",
         "TAVILY_TIMEOUT_SECONDS",
+        "KEENABLE_API_KEY",
+        "KEENABLE_API_URL",
+        "KEENABLE_ENABLED",
+        "KEENABLE_TIMEOUT_SECONDS",
+        "KEENABLE_TITLE",
         "FIRECRAWL_API_KEY",
         "FIRECRAWL_API_URL",
         "ANYSEARCH_API_KEY",
@@ -583,6 +588,26 @@ class Config:
         return float(self._get_config_value("TAVILY_TIMEOUT_SECONDS", "30") or "30")
 
     @property
+    def keenable_enabled(self) -> bool:
+        return (self._get_config_value("KEENABLE_ENABLED", "false") or "false").lower() in ("true", "1", "yes")
+
+    @property
+    def keenable_api_url(self) -> str:
+        return self._get_config_value("KEENABLE_API_URL", "https://api.keenable.ai/v1/search") or "https://api.keenable.ai/v1/search"
+
+    @property
+    def keenable_api_key(self) -> str | None:
+        return self._get_config_value("KEENABLE_API_KEY")
+
+    @property
+    def keenable_timeout(self) -> float:
+        return float(self._get_config_value("KEENABLE_TIMEOUT_SECONDS", "30") or "30")
+
+    @property
+    def keenable_title(self) -> str:
+        return self._get_config_value("KEENABLE_TITLE", "smart-search") or "smart-search"
+
+    @property
     def firecrawl_api_url(self) -> str:
         return self._get_config_value("FIRECRAWL_API_URL", "https://api.firecrawl.dev/v2") or "https://api.firecrawl.dev/v2"
 
@@ -872,6 +897,11 @@ class Config:
             "TAVILY_ENABLED": self.tavily_enabled,
             "TAVILY_API_KEY": self._mask_api_key(self.tavily_api_key) if self.tavily_api_key else "未配置",
             "TAVILY_TIMEOUT_SECONDS": self.tavily_timeout,
+            "KEENABLE_API_URL": self.keenable_api_url,
+            "KEENABLE_ENABLED": self.keenable_enabled,
+            "KEENABLE_API_KEY": self._mask_api_key(self.keenable_api_key) if self.keenable_api_key else "未配置",
+            "KEENABLE_TIMEOUT_SECONDS": self.keenable_timeout,
+            "KEENABLE_TITLE": self.keenable_title,
             "FIRECRAWL_API_URL": self.firecrawl_api_url,
             "FIRECRAWL_API_KEY": self._mask_api_key(self.firecrawl_api_key) if self.firecrawl_api_key else "未配置",
             "ANYSEARCH_API_URL": self.anysearch_api_url,

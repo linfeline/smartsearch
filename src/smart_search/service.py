@@ -46,6 +46,7 @@ from .providers.openai_compatible import (
 from .providers.sciverse import SciverseProvider
 from .providers.xai_responses import XAIResponsesSearchProvider
 from .providers.doubao import DoubaoWebSearchProvider
+from .providers.keenable import KeenableWebSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
 from .provider_errors import ProviderCallError, classify_provider_exception, provider_call_error, sanitize_provider_error_message
@@ -176,7 +177,7 @@ RESEARCH_JS_HEAVY_KEYWORDS = {
 RESEARCH_PDF_KEYWORDS = {"pdf", "arxiv", "论文", "paper", ".pdf"}
 RESEARCH_PROFILE_ORDER = {
     "main_search": ["xai-responses", "openai-compatible"],
-    "web_search": ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+    "web_search": ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"],
     "docs_search": ["context7", "exa"],
     "web_fetch": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl"],
     "vertical_search": ["anysearch"],
@@ -257,6 +258,15 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
         "quality_filters": ["non-empty normalized result", "non-empty extracted content"],
         "route_reasons": ["broad source discovery", "site map", "URL fetch"],
     },
+    "keenable": {
+        "capability": "web_search",
+        "strengths": ["broad source discovery", "global web", "low-cost search"],
+        "exclusions": ["web_fetch", "site_map", "docs semantic replacement"],
+        "fallback_group": "web_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["URL required", "non-empty normalized result"],
+        "route_reasons": ["broad global web discovery"],
+    },
     "jina": {
         "capability": "web_fetch",
         "strengths": ["known public URL", "PDF", "arXiv", "clean markdown", "ReaderLM-v2 with key"],
@@ -318,8 +328,8 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
-WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"]
-WEB_SEARCH_BROAD_CHAIN = ["tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
+WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
+WEB_SEARCH_BROAD_CHAIN = ["keenable", "tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
 MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
@@ -997,6 +1007,8 @@ def _provider_configured(provider: str) -> bool:
         return bool(config.zhipu_mcp_api_key)
     if provider == "tavily":
         return _tavily_is_enabled()
+    if provider == "keenable":
+        return config.keenable_enabled
     if provider == "jina":
         return bool(config.jina_api_key)
     if provider == "zhipu-mcp-reader":
@@ -1888,6 +1900,7 @@ def get_capability_status() -> dict[str, Any]:
                     ("doubao", _provider_configured("doubao")),
                     ("zhipu", _provider_configured("zhipu")),
                     ("zhipu-mcp", _provider_configured("zhipu-mcp")),
+                    ("keenable", _provider_configured("keenable")),
                     ("tavily", _provider_configured("tavily")),
                     ("firecrawl", _provider_configured("firecrawl")),
                 ]
@@ -1961,17 +1974,24 @@ def validate_minimum_profile() -> dict[str, Any]:
     return _minimum_profile_result(profile, get_capability_status())
 
 
-def _parse_provider_filter(providers: str = "auto") -> set[str] | None:
+def _parse_provider_filter(providers: str = "auto") -> list[str] | None:
     if not providers or providers.strip().lower() == "auto":
         return None
-    return {item.strip().lower() for item in providers.split(",") if item.strip()}
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in providers.split(","):
+        value = item.strip().lower()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return values
 
 
-def _provider_allowed(provider_id: str, provider_filter: set[str] | None) -> bool:
+def _provider_allowed(provider_id: str, provider_filter: list[str] | None) -> bool:
     if provider_filter is None:
         return True
     aliases = MAIN_SEARCH_PROVIDER_ALIASES.get(provider_id, {provider_id})
-    return bool(provider_filter.intersection(aliases))
+    return any(provider in aliases for provider in provider_filter)
 
 
 def _configured_main_search_provider_ids() -> list[str]:
@@ -2232,6 +2252,15 @@ async def _run_web_search_fallback(
                     attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
                     return sources, attempts
                 attempts.append(_attempt("web_search", provider, "empty", start))
+            elif provider == "keenable":
+                data = await keenable_search(query, count=count)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "keenable")
+                    if sources:
+                        attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = _attempt_status_for_result(data)
+                attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
             elif provider == "firecrawl":
                 results = await call_firecrawl_search(query, count)
                 sources = _normalize_source_results(results, "firecrawl")
@@ -2257,7 +2286,7 @@ async def _run_docs_search_fallback(
     if _provider_configured("exa"):
         configured.append("exa")
     if provider_filter is not None:
-        configured = [p for p in configured if p in provider_filter]
+        configured = [p for p in provider_filter if p in configured]
     if fallback == "off":
         configured = configured[:1]
 
@@ -2306,7 +2335,7 @@ async def _run_vertical_search_fallback(
     if config.anysearch_api_key:
         configured.append("anysearch")
     if provider_filter is not None:
-        configured = [p for p in configured if p in provider_filter]
+        configured = [p for p in provider_filter if p in configured]
     if fallback == "off":
         configured = configured[:1]
 
@@ -4000,6 +4029,29 @@ async def doubao_search(
     return data
 
 
+async def keenable_search(query: str, count: int = 10) -> dict[str, Any]:
+    if not config.keenable_enabled:
+        return {
+            "ok": False,
+            "error_type": "config_error",
+            "error": "KEENABLE_ENABLED 未启用。请使用 `smart-search config set KEENABLE_ENABLED true`。",
+        }
+    provider = KeenableWebSearchProvider(
+        config.keenable_api_url,
+        config.keenable_api_key or "",
+        config.keenable_timeout,
+        config.keenable_title,
+    )
+    raw = await provider.search(query=query, count=count)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": False, "error_type": "parse_error", "error": raw}
+    if not data.get("ok", False):
+        data.setdefault("error_type", "network_error")
+    return data
+
+
 async def zhipu_search(
     query: str,
     count: int = 10,
@@ -4610,6 +4662,15 @@ async def _test_tavily_connection() -> dict[str, Any]:
         }
 
 
+async def _test_keenable_connection() -> dict[str, Any]:
+    if not config.keenable_enabled:
+        return {"status": "disabled", "message": "KEENABLE_ENABLED 未启用"}
+    result = await keenable_search("test", count=1)
+    if result.get("ok"):
+        return {"status": "ok", "message": "Keenable Search 可用", "response_time_ms": result.get("elapsed_ms", 0)}
+    return {"status": "warning", "message": result.get("error", "Keenable Search 不可用"), "response_time_ms": result.get("elapsed_ms", 0)}
+
+
 async def _test_jina_connection() -> dict[str, Any]:
     if config.jina_respond_with and not config.jina_api_key:
         return {"status": "config_error", "message": "JINA_RESPOND_WITH requires JINA_API_KEY"}
@@ -4707,6 +4768,13 @@ async def doctor() -> dict[str, Any]:
         info["tavily_connection_test"] = {"status": "timeout", "message": "Tavily API 请求超时"}
     except Exception as e:
         info["tavily_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
+
+    try:
+        info["keenable_connection_test"] = await _test_keenable_connection()
+    except httpx.TimeoutException:
+        info["keenable_connection_test"] = {"status": "timeout", "message": "Keenable Search 请求超时"}
+    except Exception as e:
+        info["keenable_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
 
     try:
         info["jina_connection_test"] = await _test_jina_connection()

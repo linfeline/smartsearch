@@ -64,6 +64,9 @@
 - Use `smart-search setup --non-interactive --doubao-key "key" --doubao-api-url "https://open.feedcoopapi.com"` to save Doubao Search Infinity credentials without prompts.
 - Interactive setup asks for Zhipu API key, API URL, and search service when optional `web_search` reinforcement selects Zhipu.
 - Interactive setup asks for Doubao Search API key and API URL when optional `web_search` reinforcement selects Doubao.
+- Interactive setup can enable Keenable for broad/global `web_search`; its API key is optional because the public endpoint is supported, while authenticated use should save `KEENABLE_API_KEY` locally rather than in a repository.
+- Use `smart-search setup --non-interactive --keenable-enabled true --keenable-api-url "https://api.keenable.ai/v1/search" --keenable-key "key" --keenable-title "smart-search"` for authenticated Keenable setup. Omit `--keenable-key` for public evaluation; the provider switches to `/public` and sends `X-Keenable-Title`.
+- `KEENABLE_TIMEOUT_SECONDS` defaults to `30`; `KEENABLE_ENABLED` defaults to `false` until explicitly enabled.
 - `config set ZHIPU_SEARCH_ENGINE VALUE` must remain free-form so newly added official services do not require a CLI release.
 - `ZHIPU_API_URL` defaults to `https://open.bigmodel.cn/api`.
 - `ZHIPU_SEARCH_ENGINE` defaults to `search_std`.

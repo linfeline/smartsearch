@@ -140,7 +140,7 @@ OpenCode 路径写入托管内置文件，旧树和其他额外文件都会保�
 | --- | --- | --- | --- |
 | `main_search` | `search` | xAI Responses、OpenAI-compatible Chat Completions 或 Responses | 综合回答、快速搜索、初步总结 |
 | `docs_search` | `context7-library`、`context7-docs`、`exa-search` | Context7、Exa | 官方文档、SDK、API、框架/库文档 |
-| `web_search` | `zhipu-search`、`doubao-search`、`zhipu-mcp-search`、`search` 内部意图补强 | 智谱 Web Search API、豆包搜索、智谱 Coding Plan MCP、Tavily、Firecrawl | 中文、国内、时效、域名过滤、补充来源 |
+| `web_search` | `zhipu-search`、`doubao-search`、`zhipu-mcp-search`、`search` 内部意图补强 | 智谱 Web Search API、豆包搜索、智谱 Coding Plan MCP、Keenable、Tavily、Firecrawl | 中文/国内/时效检索，以及全球通用 Web Search |
 | `web_fetch` | `fetch`、`zhipu-mcp-reader` | Tavily、Jina Reader、智谱 Coding Plan MCP Reader、Firecrawl | 已知 URL 正文抓取、证据提取 |
 | `vertical_search` | `anysearch-domains`、`anysearch-search`、`anysearch-extract`、`anysearch-batch`、`sciverse-catalog`、`sciverse-search`、`sciverse-semantic`、`sciverse-read`、`sciverse-relations` | AnySearch 和 Sciverse（实验） | 显式结构化垂直域；Sciverse 覆盖学术文献检索、语义搜索、正文片段和引用关系 |
 | `site_map` | `map` | Tavily | 文档站、产品站、目录型站点结构 |
@@ -153,8 +153,10 @@ OpenCode 路径写入托管内置文件，旧树和其他额外文件都会保�
 | --- | --- |
 | `main_search` | xAI Responses -> OpenAI-compatible |
 | `docs_search` | Context7 只在库主体命中候选 title/id 时使用；低置信度或空 Context7 命中后由 Exa 同能力兜底，并处理官方域名、论文、产品页、可信站点发现 |
-| `web_search` | 豆包搜索 -> 智谱 Web Search API -> 智谱 Coding Plan MCP `web_search_prime` -> Tavily -> Firecrawl |
+| `web_search` | 中文/时效：豆包搜索 -> 智谱 Web Search API -> 智谱 Coding Plan MCP `web_search_prime` -> Keenable -> Tavily -> Firecrawl；全球 broad research：Keenable -> Tavily -> Firecrawl -> 豆包 -> 智谱 -> 智谱 MCP |
 | `web_fetch` | Tavily -> 带 `JINA_API_KEY` 的 Jina Reader -> 智谱 Coding Plan MCP `webReader` -> Firecrawl |
+
+全球 broad 路由采用 Keenable 优先的依据记录在 `scripts/benchmark_web_search.md`；查询分布或 Provider 行为发生明显变化时，重新运行 `scripts/benchmark_web_search.py`。
 
 AnySearch 和 Sciverse 当前都只作为实验 `vertical_search` 暴露，不进入 `web_search` 兜底链，也不是 `standard` 最低配置要求。Sciverse 也不是 `docs_search`，不会加入默认 `search` / `research` 路由；需要学术字段、语义论文命中、正文片段或引用/参考文献关系时，请显式运行 `sciverse-*` 命令。
 
@@ -178,7 +180,7 @@ Jina Reader 只属于 `web_fetch`，不是通用搜索 provider。只有配置 `
 
 `extra_sources` 只是候选来源，不等于自动事实校验。新闻、政策、财经、医疗、严肃评测、工具选型等高风险问题，建议先发现来源，再 `fetch` 关键网页正文，最后只基于抓到的正文写结论。
 
-搜索引擎选择速记：先用 `search` 做宽泛探索和综合；想让 CLI 执行完整证据流时用 `research`；中文、国内、政策、公告、当前新闻优先补 `doubao-search` 或 `zhipu-search`；只有明确要用 Coding Plan 额度时才走 `zhipu-mcp-*`；库/API/框架文档优先用 Context7；官方域名、论文、产品页、可信站点和低噪声发现再用 Exa；Tavily/Firecrawl 通过 `search --extra-sources` 做横向候选，通过 `fetch` 做正文证据；Jina 用于已知 URL 正文抓取；AnySearch 只在明确要实验性垂直搜索时使用；Sciverse 只在明确要学术 catalog/search/semantic/read/relations 时使用。
+搜索引擎选择速记：先用 `search` 做宽泛探索和综合；想让 CLI 执行完整证据流时用 `research`；中文、国内、政策、公告、当前新闻优先豆包/智谱；全球通用 Web Search 优先 Keenable，Tavily 作为同能力兜底；库/API/框架文档优先 Context7；官方域名、论文、产品页、可信站点和低噪声发现再用 Exa；Tavily/Firecrawl 继续承担正文抓取和补充来源；Jina 用于已知 URL 正文抓取；AnySearch 只在明确要实验性垂直搜索时使用；Sciverse 只在明确要学术 catalog/search/semantic/read/relations 时使用。
 
 ## Deep Research 深度搜索
 
@@ -266,7 +268,8 @@ smart-search deep "https://example.com/source" --format json
 | 智谱 Web Search API | 中文、国内、时效、域名过滤类来源发现 | `ZHIPU_API_KEY`、`ZHIPU_API_URL`、`ZHIPU_SEARCH_ENGINE` | [智谱联网搜索文档](https://docs.bigmodel.cn/cn/guide/tools/web-search) | [智谱 API keys](https://open.bigmodel.cn/usercenter/apikeys) |
 | 豆包搜索（Search Infinity） | 中文、国内、时效来源发现，走字节搜索索引 | `DOUBAO_SEARCH_API_KEY`、`DOUBAO_SEARCH_API_URL` | [豆包搜索 Custom 版](https://www.volcengine.com/docs/87772/2272953) | [联网搜索 API Key](https://console.volcengine.com/search-infinity/api-key) |
 | 智谱 Coding Plan Remote MCP | 使用 Coding Plan 额度做联网搜索、网页读取、开源仓库发现 | `ZHIPU_MCP_API_KEY`、`ZHIPU_MCP_SEARCH_API_URL`、`ZHIPU_MCP_READER_API_URL`、`ZHIPU_MCP_ZREAD_API_URL` | [联网搜索 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/search-mcp-server)、[网页读取 MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/reader-mcp-server)、[zread MCP](https://docs.bigmodel.cn/cn/coding-plan/mcp/zread-mcp-server) | [智谱 API keys](https://open.bigmodel.cn/usercenter/apikeys) |
-| Tavily | 额外来源、URL fetch、站点 map | `TAVILY_API_URL`、`TAVILY_API_KEY`、`TAVILY_ENABLED` | [Tavily docs](https://docs.tavily.com/) | [Tavily app](https://app.tavily.com/home) |
+| Keenable | 全球通用 Web Search；benchmark 选出的 Tavily 前置主力 | `KEENABLE_API_URL`、`KEENABLE_API_KEY`、`KEENABLE_ENABLED`、`KEENABLE_TIMEOUT_SECONDS`、`KEENABLE_TITLE` | [Keenable Search API](https://docs.keenable.ai/api-reference/search) | 需要时使用 Keenable 账号/API 权限 |
+| Tavily | 全球 Web Search 兜底、URL fetch、站点 map | `TAVILY_API_URL`、`TAVILY_API_KEY`、`TAVILY_ENABLED` | [Tavily docs](https://docs.tavily.com/) | [Tavily app](https://app.tavily.com/home) |
 | Jina Reader | 已知 URL 正文抓取；满足 standard 最低配置必须有 key | `JINA_API_KEY`、`JINA_READER_API_URL`、`JINA_RESPOND_WITH`、`JINA_TIMEOUT_SECONDS` | [Jina Reader](https://jina.ai/reader/) | [Jina AI](https://jina.ai/) |
 | Firecrawl | fetch 兜底、补充网页来源 | `FIRECRAWL_API_URL`、`FIRECRAWL_API_KEY` | [Firecrawl docs](https://docs.firecrawl.dev/) | [Firecrawl API keys](https://www.firecrawl.dev/app/api-keys) |
 | AnySearch | 实验垂直搜索验收入口，不是默认兜底 | `ANYSEARCH_API_URL`、`ANYSEARCH_API_KEY`、`ANYSEARCH_TIMEOUT_SECONDS` | [AnySearch 文档](https://www.anysearch.com/docs) | [AnySearch API keys](https://www.anysearch.com/console/api-keys) |
@@ -316,6 +319,7 @@ smart-search route-calibrate --models "Qwen/Qwen3-Embedding-8B" --format markdow
 - 智谱 Coding Plan MCP 需要单独的 Coding Plan 权益。普通 `ZHIPU_API_KEY` 能用 Web Search API，不代表能用 `zhipu-mcp-search` 或 zread。未配置或未授权 `ZHIPU_MCP_API_KEY` 时，Smart Search 会跳过这些 MCP provider；`standard` 最低配置和同 capability 兜底仍会通过已配置的 REST/search/fetch provider 工作。
 - Jina Reader 不是通用搜索 provider。只有配置 `JINA_API_KEY` 后才计入 `standard`；`JINA_RESPOND_WITH=readerlm-v2` 也必须配置 `JINA_API_KEY`。
 - `ZHIPU_SEARCH_ENGINE` 默认是 `search_std`。官方值包括 `search_std`、`search_pro`、`search_pro_sogou`、`search_pro_quark`；`config set` 仍允许自定义值，方便官方以后新增服务。
+- `KEENABLE_ENABLED` 默认 `false`。`KEENABLE_API_URL` 默认 `https://api.keenable.ai/v1/search`；未配置 key 时会自动改走 `/public` 并携带必需的 `KEENABLE_TITLE`，配置 key 后走正式端点并使用 `X-API-Key`。
 - `TAVILY_API_URL` 只影响 Tavily，不会代理智谱。Tavily Hikari / 号池用 `https://<host>/api/tavily`；setup 会把根域名或 `/mcp` 输入规范化成这个 REST base。
 - `TAVILY_ENABLED` 默认是 `true`。即使已有 key，设为 `false` 也会禁用 Tavily：它会从 web-search 和 fetch 路由中移除，直接 Tavily 调用和 `doctor` 都不会发 Tavily 请求，`map` 会本地返回配置错误。它不会启用 Firecrawl，也不会改变同 capability 兜底边界。
 - `FIRECRAWL_API_URL` 默认是 `https://api.firecrawl.dev/v2`。
@@ -455,6 +459,11 @@ smart-search sciverse-relations "unique-id-from-search" --relation CITATIONS --p
 | `TAVILY_API_KEY` | Tavily key |
 | `TAVILY_ENABLED` | 默认 `true`；只有 `true`、`1`、`yes` 启用 Tavily，其他值禁用且不发 Tavily 网络请求 |
 | `TAVILY_TIMEOUT_SECONDS` | Tavily 连通性检查超时，默认 `30`；公益站/号池较慢时可调大 |
+| `KEENABLE_API_URL` | Keenable Search endpoint，默认 `https://api.keenable.ai/v1/search` |
+| `KEENABLE_API_KEY` | 可选 Keenable API key；配置后通过 `X-API-Key` 发送 |
+| `KEENABLE_ENABLED` | 默认 `false`；启用后加入 `web_search` 路由 |
+| `KEENABLE_TIMEOUT_SECONDS` | Keenable 请求超时，默认 `30` |
+| `KEENABLE_TITLE` | 无 token 公共搜索请求的应用标识 |
 | `FIRECRAWL_API_URL` | Firecrawl REST base |
 | `FIRECRAWL_API_KEY` | Firecrawl key |
 | `SMART_SEARCH_VALIDATION_LEVEL` | `fast`、`balanced`、`strict` |

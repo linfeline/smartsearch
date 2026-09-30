@@ -300,6 +300,10 @@ class IntentRouteResult:
     web_current_intent: bool = False
     fetch_intent: bool = False
     supplemental_paths: list[str] = field(default_factory=list)
+    primary_capability: str = ""
+    supplemental_capabilities: list[str] = field(default_factory=list)
+    hard_route: bool = False
+    query_plan: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -308,6 +312,10 @@ class IntentRouteResult:
             "web_current_intent": self.web_current_intent,
             "fetch_intent": self.fetch_intent,
             "supplemental_paths": list(self.supplemental_paths),
+            "primary_capability": self.primary_capability,
+            "supplemental_capabilities": list(self.supplemental_capabilities),
+            "hard_route": self.hard_route,
+            "query_plan": {key: list(value) for key, value in self.query_plan.items()},
             "intent_router_mode": self.intent_router_mode,
             "required_capabilities": list(self.required_capabilities),
             "intent_signals": dict(self.intent_signals),
@@ -383,6 +391,22 @@ def build_rules_route(
     if vertical_intent:
         add_capability("vertical_search", "rules matched vertical-domain terms", 0.72)
 
+    ordered = _ordered_capabilities(capabilities)
+    primary_capability = ""
+    hard_route = False
+    if urls:
+        primary_capability = "web_fetch"
+        hard_route = True
+    elif docs_intent:
+        primary_capability = "docs_search"
+        hard_route = True
+    elif vertical_intent:
+        primary_capability = "vertical_search"
+    elif web_current_intent:
+        primary_capability = "web_search"
+    supplemental_capabilities = [item for item in ordered if item != primary_capability]
+    query_plan = {capability: [query] for capability in ordered}
+
     confidence = max(signal_scores.values(), default=0.35)
     intent_signals: dict[str, Any] = {
         "docs_api_intent": docs_intent,
@@ -407,7 +431,11 @@ def build_rules_route(
         zh_current_intent=bool(zh_current_intent),
         web_current_intent=web_current_intent,
         fetch_intent=fetch_intent,
-        supplemental_paths=_ordered_capabilities(set(supplemental_paths)),
+        supplemental_paths=ordered,
+        primary_capability=primary_capability,
+        supplemental_capabilities=supplemental_capabilities,
+        hard_route=hard_route,
+        query_plan=query_plan,
     )
 
 
@@ -671,6 +699,17 @@ class IntentRouter:
             degraded_reasons.append("classifier not configured")
 
         required_capabilities = _ordered_capabilities(merged_caps)
+        primary_capability = rules.primary_capability
+        if not primary_capability and required_capabilities:
+            semantic_top = str(merged_signals.get("semantic_top_capability") or "")
+            if semantic_top in required_capabilities and merged_signals.get("semantic_passed_threshold") and merged_signals.get("semantic_passed_margin"):
+                primary_capability = semantic_top
+            else:
+                primary_capability = required_capabilities[0]
+        supplemental_capabilities = [item for item in required_capabilities if item != primary_capability]
+        query_plan = dict(rules.query_plan)
+        for capability in required_capabilities:
+            query_plan.setdefault(capability, [query])
         return IntentRouteResult(
             query=query,
             intent_router_mode="hybrid",
@@ -686,6 +725,10 @@ class IntentRouter:
             web_current_intent=rules.web_current_intent,
             fetch_intent=rules.fetch_intent or "web_fetch" in required_capabilities,
             supplemental_paths=required_capabilities,
+            primary_capability=primary_capability,
+            supplemental_capabilities=supplemental_capabilities,
+            hard_route=rules.hard_route,
+            query_plan=query_plan,
         )
 
     def _embeddings_configured(self) -> bool:

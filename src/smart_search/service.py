@@ -51,6 +51,7 @@ from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
 from .provider_errors import ProviderCallError, classify_provider_exception, provider_call_error, sanitize_provider_error_message
 from .provider_health import provider_fingerprint, provider_health
+from .evidence import build_evidence_prompt, evidence_assessment, fuse_source_groups, mark_fetched
 from .sciverse_schema import (
     SciverseParameterError,
     build_sciverse_meta_search_payload,
@@ -331,6 +332,7 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
 WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
 WEB_SEARCH_BROAD_CHAIN = ["keenable", "tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
+WEB_SEARCH_HEDGE_DELAY_SECONDS = 0.8
 MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
@@ -2390,14 +2392,32 @@ async def _run_docs_search_fallback(
                 if data.get("ok"):
                     selected_library = _select_context7_library_candidate(data.get("results"), query)
                     if selected_library:
-                        source = {
-                            "url": f"context7:{selected_library.get('id')}",
-                            "title": selected_library.get("title") or selected_library.get("id") or "Context7",
-                            "description": selected_library.get("description") or "",
-                            "provider": "context7",
-                        }
-                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
-                        return [source], attempts
+                        library_id = str(selected_library.get("id") or "")
+                        docs = await context7_docs(library_id, query)
+                        if docs.get("ok") and docs.get("content"):
+                            content = str(docs.get("content") or "")
+                            source = {
+                                "url": f"context7:{library_id}",
+                                "title": selected_library.get("title") or library_id or "Context7",
+                                "description": content[:1200],
+                                "verified_content": content,
+                                "verified": True,
+                                "provider": "context7",
+                            }
+                            attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
+                            return [source], attempts
+                        status = _attempt_status_for_result(docs)
+                        attempts.append(
+                            _attempt(
+                                "docs_search",
+                                provider,
+                                status,
+                                start,
+                                error_type=docs.get("error_type", ""),
+                                error=docs.get("error", ""),
+                            )
+                        )
+                        continue
                     attempts.append(_attempt("docs_search", provider, "empty", start))
                 else:
                     status = _attempt_status_for_result(data)
@@ -2661,6 +2681,147 @@ async def call_tavily_map(
     except Exception as exc:
         error_type, error = classify_provider_exception(exc, additional_secrets=(api_key,))
         return {"ok": False, "error_type": error_type, "error": error}
+
+
+def _evidence_groups_from_sources(
+    sources: list[dict[str, Any]],
+    *,
+    capability: str,
+    query: str,
+    default_provider: str = "",
+) -> list[dict[str, Any]]:
+    by_provider: dict[str, list[dict[str, Any]]] = {}
+    for source in sources or []:
+        provider = str(source.get("provider") or default_provider or capability)
+        by_provider.setdefault(provider, []).append(source)
+    return [
+        {
+            "provider": provider,
+            "capability": capability,
+            "query": query,
+            "sources": items,
+        }
+        for provider, items in by_provider.items()
+    ]
+
+
+async def _run_web_search_hedged(
+    query: str,
+    *,
+    count: int,
+    provider_order: list[str],
+    fallback: str,
+    validation: str,
+) -> tuple[list[dict], list[dict]]:
+    selected = provider_order[:1] if fallback == "off" else provider_order[:2]
+    if not selected:
+        return [], []
+    if len(selected) == 1 or validation == "fast":
+        return await _run_web_search_fallback(
+            query,
+            count=count,
+            providers=selected[0],
+            fallback="off",
+        )
+
+    async def run_one(provider: str) -> tuple[list[dict], list[dict]]:
+        return await _run_web_search_fallback(
+            query,
+            count=count,
+            providers=provider,
+            fallback="off",
+        )
+
+    first = asyncio.create_task(run_one(selected[0]))
+    second: asyncio.Task | None = None
+    if validation == "strict":
+        second = asyncio.create_task(run_one(selected[1]))
+    else:
+        try:
+            sources, attempts = await asyncio.wait_for(
+                asyncio.shield(first),
+                timeout=WEB_SEARCH_HEDGE_DELAY_SECONDS,
+            )
+            if sources:
+                return sources, attempts
+            second = asyncio.create_task(run_one(selected[1]))
+        except asyncio.TimeoutError:
+            second = asyncio.create_task(run_one(selected[1]))
+
+    if validation != "strict" and second is not None:
+        task_provider = {first: selected[0], second: selected[1]}
+        pending: set[asyncio.Task] = {first, second}
+        merged_attempts: list[dict] = []
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                provider = task_provider[task]
+                try:
+                    sources, attempts = task.result()
+                except BaseException as exc:
+                    merged_attempts.append(_attempt_from_exception("web_search", provider, time.time(), exc))
+                    continue
+                if provider == selected[1]:
+                    for attempt in attempts:
+                        attempt["hedged"] = True
+                merged_attempts.extend(attempts)
+                if sources:
+                    for leftover in pending:
+                        leftover.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return sources, merged_attempts
+        return [], merged_attempts
+
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+    merged_sources: list[dict] = []
+    merged_attempts: list[dict] = []
+    for provider, outcome in zip(selected, outcomes):
+        if isinstance(outcome, BaseException):
+            merged_attempts.append(_attempt_from_exception("web_search", provider, time.time(), outcome))
+            continue
+        sources, attempts = outcome
+        if provider == selected[1]:
+            for attempt in attempts:
+                attempt["hedged"] = True
+        merged_sources.extend(sources)
+        merged_attempts.extend(attempts)
+    return merge_sources(merged_sources), merged_attempts
+
+
+async def _synthesize_from_evidence(
+    query: str,
+    evidence: list[dict[str, Any]],
+    assessment: dict[str, Any],
+    provider_config: dict[str, Any],
+    budget: SearchBudget,
+) -> tuple[str, dict[str, Any] | None]:
+    if not evidence or budget.remaining_seconds() <= 0:
+        return "", None
+    config_for_synthesis = dict(provider_config)
+    config_for_synthesis["tools"] = []
+    config_for_synthesis["stream"] = False
+    provider = _main_search_providers([config_for_synthesis], fallback="off")[0]
+    prompt = build_evidence_prompt(query, evidence, assessment)
+    started = time.time()
+    try:
+        raw = await asyncio.wait_for(
+            provider.search(prompt, ""),
+            timeout=max(0.001, budget.remaining_seconds()),
+        )
+        text = raw if isinstance(raw, str) else str(raw)
+        answer, _sources = split_answer_and_sources(text)
+        if answer.strip():
+            return answer.strip(), _attempt(
+                "synthesis",
+                provider.get_provider_name(),
+                "ok",
+                started,
+                result_count=1,
+            )
+        return "", _attempt("synthesis", provider.get_provider_name(), "empty", started)
+    except Exception as exc:
+        return "", _attempt_from_exception("synthesis", provider.get_provider_name(), started, exc)
 
 
 async def search(
@@ -3057,77 +3218,229 @@ async def search(
     extra_source_items = extra_results_to_sources(tavily_results, firecrawl_results)
 
     supplemental_sources: list[dict] = []
-    if validation_level in {"balanced", "strict"}:
-        if "docs_search" in supplemental_paths:
-            docs_ok, docs_result = await _run_budgeted_phase(
-                lambda: _run_docs_search_fallback(query, providers=providers, fallback=fallback_mode),
-                budget,
-                execution,
-                "supplemental",
-                timeout_reason="optional docs_search reached the shared search deadline",
-                details={"capability": "docs_search"},
-            )
-            if docs_ok and docs_result:
-                docs_sources, docs_attempts = docs_result
-                provider_attempts.extend(docs_attempts)
-                supplemental_sources.extend(docs_sources)
-        if "web_search" in supplemental_paths:
-            web_ok, web_result = await _run_budgeted_phase(
-                lambda: _run_web_search_fallback(
-                    query,
-                    count=max(1, extra_sources or 3),
-                    providers=providers,
-                    fallback=fallback_mode,
-                ),
-                budget,
-                execution,
-                "supplemental",
-                timeout_reason="optional web_search reached the shared search deadline",
-                details={"capability": "web_search"},
-            )
-            if web_ok and web_result:
-                web_sources, web_attempts = web_result
-                provider_attempts.extend(web_attempts)
-                supplemental_sources.extend(web_sources)
-        if "web_fetch" in supplemental_paths:
-            fetch_url = fetch_urls[0] if fetch_urls else query.strip()
-            fetch_ok, fetch_phase_result = await _run_budgeted_phase(
-                lambda: _run_web_fetch_fallback(fetch_url, fallback=fallback_mode),
-                budget,
-                execution,
-                "supplemental",
-                timeout_reason="optional web_fetch reached the shared search deadline",
-                details={"capability": "web_fetch"},
-            )
-            if fetch_ok and fetch_phase_result:
-                fetch_result, fetch_attempts = fetch_phase_result
+    supplemental_by_capability: dict[str, list[dict]] = {}
+    if validation_level in {"balanced", "strict"} and supplemental_paths:
+        route_plan = _research_capability_routes(
+            query,
+            {"intent_signals": dict(route_result.intent_signals)},
+            fallback_mode,
+            route_result=route_result,
+        )
+        routing_decision["provider_routes"] = route_plan.get("capabilities", {})
+
+        async def run_supplemental(capability: str) -> tuple[bool, Any]:
+            if capability == "docs_search":
+                order = route_plan["capabilities"]["docs_search"]["providers"]
+                provider_arg = providers if providers != "auto" else ",".join(order) or "auto"
+                return await _run_budgeted_phase(
+                    lambda: _run_docs_search_fallback(
+                        query,
+                        providers=provider_arg,
+                        fallback=fallback_mode,
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional docs_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "web_search":
+                order = route_plan["capabilities"]["web_search"]["providers"]
+                if providers == "auto" and order:
+                    operation = lambda: _run_web_search_hedged(
+                        query,
+                        count=max(1, extra_sources or 3),
+                        provider_order=order,
+                        fallback=fallback_mode,
+                        validation=validation_level,
+                    )
+                else:
+                    operation = lambda: _run_web_search_fallback(
+                        query,
+                        count=max(1, extra_sources or 3),
+                        providers=providers if providers != "auto" else "auto",
+                        fallback=fallback_mode,
+                    )
+                return await _run_budgeted_phase(
+                    operation,
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional web_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "web_fetch":
+                fetch_url = fetch_urls[0] if fetch_urls else query.strip()
+                return await _run_budgeted_phase(
+                    lambda: _run_web_fetch_fallback(
+                        fetch_url,
+                        fallback=fallback_mode,
+                        preferred_order=_research_fetch_order(query, fetch_url),
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional web_fetch reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "vertical_search":
+                order = route_plan["capabilities"]["vertical_search"]["providers"]
+                provider_arg = providers if providers != "auto" else ",".join(order) or "auto"
+                return await _run_budgeted_phase(
+                    lambda: _run_vertical_search_fallback(
+                        query,
+                        providers=provider_arg,
+                        fallback=fallback_mode,
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional vertical_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            return False, None
+
+        capabilities = [capability for capability in supplemental_paths if capability in ROUTABLE_CAPABILITIES]
+        outcomes = await asyncio.gather(
+            *(run_supplemental(capability) for capability in capabilities),
+            return_exceptions=True,
+        )
+        for capability, outcome in zip(capabilities, outcomes):
+            if isinstance(outcome, BaseException):
+                continue
+            phase_ok, phase_result = outcome
+            if not phase_ok or not phase_result:
+                continue
+            if capability == "web_fetch":
+                fetch_result, fetch_attempts = phase_result
                 provider_attempts.extend(fetch_attempts)
                 if fetch_result:
-                    supplemental_sources.append({"url": fetch_result["url"], "provider": fetch_result["provider"], "description": fetch_result["content"][:300]})
-        if "vertical_search" in supplemental_paths:
-            vertical_ok, vertical_result = await _run_budgeted_phase(
-                lambda: _run_vertical_search_fallback(query, providers=providers, fallback=fallback_mode),
-                budget,
-                execution,
-                "supplemental",
-                timeout_reason="optional vertical_search reached the shared search deadline",
-                details={"capability": "vertical_search"},
-            )
-            if vertical_ok and vertical_result:
-                vertical_sources, vertical_attempts = vertical_result
-                provider_attempts.extend(vertical_attempts)
-                supplemental_sources.extend(vertical_sources)
+                    source = {
+                        "url": fetch_result["url"],
+                        "provider": fetch_result["provider"],
+                        "description": fetch_result["content"][:1200],
+                        "verified_content": fetch_result["content"],
+                        "verified": True,
+                    }
+                    supplemental_sources.append(source)
+                    supplemental_by_capability[capability] = [source]
+                continue
+            cap_sources, cap_attempts = phase_result
+            provider_attempts.extend(cap_attempts)
+            supplemental_sources.extend(cap_sources)
+            supplemental_by_capability[capability] = cap_sources
 
     extra_source_items = merge_sources(extra_source_items, supplemental_sources)
     sources = merge_sources(primary_sources, extra_source_items)
-    ok = bool(answer or sources)
-    if validation_level == "strict" and not sources:
-        ok = False
     optional_phase_limited = any(
         attempt.get("phase") in {"extra_sources", "supplemental"}
         and attempt.get("status") in {"timeout", "skipped"}
         for attempt in execution.phase_attempts
     )
+
+    evidence_groups = _evidence_groups_from_sources(
+        primary_sources,
+        capability="main_search",
+        query=query,
+        default_provider=successful_main_config.get("provider", "main_search"),
+    )
+    evidence_groups.extend(
+        _evidence_groups_from_sources(
+            extra_results_to_sources(tavily_results, firecrawl_results),
+            capability="web_search",
+            query=query,
+        )
+    )
+    for capability, cap_sources in supplemental_by_capability.items():
+        evidence_groups.extend(
+            _evidence_groups_from_sources(
+                cap_sources,
+                capability=capability,
+                query=query,
+            )
+        )
+    evidence = fuse_source_groups(evidence_groups)
+
+    if validation_level == "strict" and evidence and not optional_phase_limited:
+        fetch_candidates = [
+            item
+            for item in evidence
+            if not item.get("verified")
+            and str(item.get("url") or "").startswith(("http://", "https://"))
+        ][:3]
+
+        async def fetch_evidence_item(item: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict]]:
+            return await _run_web_fetch_fallback(
+                str(item.get("url") or ""),
+                fallback=fallback_mode,
+                preferred_order=_research_fetch_order(query, str(item.get("url") or "")),
+            )
+
+        if fetch_candidates:
+            fetch_outcomes = await asyncio.gather(
+                *(fetch_evidence_item(item) for item in fetch_candidates),
+                return_exceptions=True,
+            )
+            fetched_items: list[dict[str, Any]] = []
+            for candidate, outcome in zip(fetch_candidates, fetch_outcomes):
+                if isinstance(outcome, BaseException):
+                    continue
+                fetch_result, fetch_attempts = outcome
+                provider_attempts.extend(fetch_attempts)
+                if fetch_result:
+                    fetched_items.append(
+                        {
+                            "url": fetch_result["url"],
+                            "title": candidate.get("title") or fetch_result["url"],
+                            "content": fetch_result["content"],
+                            "provider": fetch_result["provider"],
+                        }
+                    )
+            mark_fetched(evidence, fetched_items)
+
+    verification_query = any(
+        token in query.lower()
+        for token in ("核验", "验证", "真假", "verify", "fact check", "是否真的")
+    )
+    assessment = evidence_assessment(
+        evidence,
+        validation=validation_level,
+        primary_capability=route_result.primary_capability or "main_search",
+        known_url=bool(fetch_urls),
+        verification_query=verification_query,
+    )
+
+    synthesis_grounded = False
+    if (
+        validation_level in {"balanced", "strict"}
+        and assessment.get("sufficient")
+        and any(item.get("verified") for item in evidence)
+        and budget.remaining_seconds() > 0
+    ):
+        synthesis_start = time.monotonic()
+        synthesized, synthesis_attempt = await _synthesize_from_evidence(
+            query,
+            evidence,
+            assessment,
+            successful_main_config,
+            budget,
+        )
+        if synthesis_attempt:
+            provider_attempts.append(synthesis_attempt)
+        if synthesized:
+            answer = synthesized
+            synthesis_grounded = True
+        execution.record(
+            "synthesis",
+            "ok" if synthesized else "error",
+            synthesis_start,
+            budget.remaining_seconds(),
+            details={"grounded": bool(synthesized)},
+        )
+
+    ok = bool(answer or sources)
+    if validation_level == "strict" and not assessment.get("sufficient"):
+        ok = False
     return {
         "ok": ok,
         "error_type": "" if ok else ("evidence_error" if validation_level == "strict" else "network_error"),
@@ -3144,8 +3457,13 @@ async def search(
         "primary_sources_count": len(primary_sources),
         "extra_sources": extra_source_items,
         "extra_sources_count": len(extra_source_items),
-        "source_warning": SOURCE_PROVENANCE_WARNING if extra_source_items else "",
+        "source_warning": "" if synthesis_grounded else (SOURCE_PROVENANCE_WARNING if extra_source_items else ""),
         "routing_decision": routing_decision,
+        "evidence_assessment": assessment,
+        "synthesis": {
+            "grounded": synthesis_grounded,
+            "provider": successful_main_config.get("provider", "") if synthesis_grounded else "",
+        },
         "providers_used": _provider_names_from_attempts(provider_attempts),
         "provider_attempts": provider_attempts,
         "fallback_used": _fallback_used(provider_attempts),

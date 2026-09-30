@@ -27,3 +27,5 @@ def test_strict_does_not_accept_unfetched_urls():
         verification_query=True,
     )
     assert assessment["sufficient"] is False
+    assert "needs_verified_content" in assessment["gaps"]
+    assert "needs_second_independent_source" in assessment["gaps"]

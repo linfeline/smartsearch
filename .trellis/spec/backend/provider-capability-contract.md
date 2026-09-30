@@ -682,6 +682,14 @@ Output contracts:
 - `search` must expose the effective OpenAI-compatible stream decision in
   `routing_decision.openai_compatible_stream` when that provider is attempted.
   This is the stream preference, not proof that the final transport was stream.
+- In `balanced` mode, deterministic hard routes whose primary capability is
+  `docs_search` or `web_fetch` may perform that primary retrieval before
+  `main_search`. The retrieval phase must be capped so the configured main
+  reserve remains available. When verified evidence is obtained, `main_search`
+  synthesizes directly from that evidence with search tools disabled, and the
+  same capability must not be executed again as a post-main supplemental phase.
+  If primary retrieval times out or yields no verified evidence, fall back to
+  the normal main-search path. `strict` keeps its existing full evidence loop.
 - `search` must expose the OpenAI-compatible model candidates used for the
   invocation in `routing_decision.openai_compatible_models` and whether model
   fallback was enabled in

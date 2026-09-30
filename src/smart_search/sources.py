@@ -128,7 +128,9 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
             url = (item or {}).get("url")
             if not isinstance(url, str):
                 continue
-            url = normalize_extracted_url(url)
+            url = url.strip()
+            if url.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
+                url = normalize_extracted_url(url)
             if not url:
                 continue
             if url in seen:

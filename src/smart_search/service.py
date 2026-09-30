@@ -51,6 +51,7 @@ from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
 from .provider_errors import ProviderCallError, classify_provider_exception, provider_call_error, sanitize_provider_error_message
 from .provider_health import provider_fingerprint, provider_health
+from .evidence import build_evidence_prompt, evidence_assessment, fuse_source_groups, mark_fetched
 from .sciverse_schema import (
     SciverseParameterError,
     build_sciverse_meta_search_payload,
@@ -331,6 +332,7 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
 WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
 WEB_SEARCH_BROAD_CHAIN = ["keenable", "tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
+WEB_SEARCH_HEDGE_DELAY_SECONDS = 0.8
 MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
@@ -2390,14 +2392,32 @@ async def _run_docs_search_fallback(
                 if data.get("ok"):
                     selected_library = _select_context7_library_candidate(data.get("results"), query)
                     if selected_library:
-                        source = {
-                            "url": f"context7:{selected_library.get('id')}",
-                            "title": selected_library.get("title") or selected_library.get("id") or "Context7",
-                            "description": selected_library.get("description") or "",
-                            "provider": "context7",
-                        }
-                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
-                        return [source], attempts
+                        library_id = str(selected_library.get("id") or "")
+                        docs = await context7_docs(library_id, query)
+                        if docs.get("ok") and docs.get("content"):
+                            content = str(docs.get("content") or "")
+                            source = {
+                                "url": f"context7:{library_id}",
+                                "title": selected_library.get("title") or library_id or "Context7",
+                                "description": content[:1200],
+                                "verified_content": content,
+                                "verified": True,
+                                "provider": "context7",
+                            }
+                            attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
+                            return [source], attempts
+                        status = _attempt_status_for_result(docs)
+                        attempts.append(
+                            _attempt(
+                                "docs_search",
+                                provider,
+                                status,
+                                start,
+                                error_type=docs.get("error_type", ""),
+                                error=docs.get("error", ""),
+                            )
+                        )
+                        continue
                     attempts.append(_attempt("docs_search", provider, "empty", start))
                 else:
                     status = _attempt_status_for_result(data)
@@ -2663,6 +2683,147 @@ async def call_tavily_map(
         return {"ok": False, "error_type": error_type, "error": error}
 
 
+def _evidence_groups_from_sources(
+    sources: list[dict[str, Any]],
+    *,
+    capability: str,
+    query: str,
+    default_provider: str = "",
+) -> list[dict[str, Any]]:
+    by_provider: dict[str, list[dict[str, Any]]] = {}
+    for source in sources or []:
+        provider = str(source.get("provider") or default_provider or capability)
+        by_provider.setdefault(provider, []).append(source)
+    return [
+        {
+            "provider": provider,
+            "capability": capability,
+            "query": query,
+            "sources": items,
+        }
+        for provider, items in by_provider.items()
+    ]
+
+
+async def _run_web_search_hedged(
+    query: str,
+    *,
+    count: int,
+    provider_order: list[str],
+    fallback: str,
+    validation: str,
+) -> tuple[list[dict], list[dict]]:
+    selected = provider_order[:1] if fallback == "off" else provider_order[:2]
+    if not selected:
+        return [], []
+    if len(selected) == 1 or validation == "fast":
+        return await _run_web_search_fallback(
+            query,
+            count=count,
+            providers=selected[0],
+            fallback="off",
+        )
+
+    async def run_one(provider: str) -> tuple[list[dict], list[dict]]:
+        return await _run_web_search_fallback(
+            query,
+            count=count,
+            providers=provider,
+            fallback="off",
+        )
+
+    first = asyncio.create_task(run_one(selected[0]))
+    second: asyncio.Task | None = None
+    if validation == "strict":
+        second = asyncio.create_task(run_one(selected[1]))
+    else:
+        try:
+            sources, attempts = await asyncio.wait_for(
+                asyncio.shield(first),
+                timeout=WEB_SEARCH_HEDGE_DELAY_SECONDS,
+            )
+            if sources:
+                return sources, attempts
+            second = asyncio.create_task(run_one(selected[1]))
+        except asyncio.TimeoutError:
+            second = asyncio.create_task(run_one(selected[1]))
+
+    if validation != "strict" and second is not None:
+        task_provider = {first: selected[0], second: selected[1]}
+        pending: set[asyncio.Task] = {first, second}
+        merged_attempts: list[dict] = []
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                provider = task_provider[task]
+                try:
+                    sources, attempts = task.result()
+                except BaseException as exc:
+                    merged_attempts.append(_attempt_from_exception("web_search", provider, time.time(), exc))
+                    continue
+                if provider == selected[1]:
+                    for attempt in attempts:
+                        attempt["hedged"] = True
+                merged_attempts.extend(attempts)
+                if sources:
+                    for leftover in pending:
+                        leftover.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return sources, merged_attempts
+        return [], merged_attempts
+
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+    merged_sources: list[dict] = []
+    merged_attempts: list[dict] = []
+    for provider, outcome in zip(selected, outcomes):
+        if isinstance(outcome, BaseException):
+            merged_attempts.append(_attempt_from_exception("web_search", provider, time.time(), outcome))
+            continue
+        sources, attempts = outcome
+        if provider == selected[1]:
+            for attempt in attempts:
+                attempt["hedged"] = True
+        merged_sources.extend(sources)
+        merged_attempts.extend(attempts)
+    return merge_sources(merged_sources), merged_attempts
+
+
+async def _synthesize_from_evidence(
+    query: str,
+    evidence: list[dict[str, Any]],
+    assessment: dict[str, Any],
+    provider_config: dict[str, Any],
+    budget: SearchBudget,
+) -> tuple[str, dict[str, Any] | None]:
+    if not evidence or budget.remaining_seconds() <= 0:
+        return "", None
+    config_for_synthesis = dict(provider_config)
+    config_for_synthesis["tools"] = []
+    config_for_synthesis["stream"] = False
+    provider = _main_search_providers([config_for_synthesis], fallback="off")[0]
+    prompt = build_evidence_prompt(query, evidence, assessment)
+    started = time.time()
+    try:
+        raw = await asyncio.wait_for(
+            provider.search(prompt, ""),
+            timeout=max(0.001, budget.remaining_seconds()),
+        )
+        text = raw if isinstance(raw, str) else str(raw)
+        answer, _sources = split_answer_and_sources(text)
+        if answer.strip():
+            return answer.strip(), _attempt(
+                "synthesis",
+                provider.get_provider_name(),
+                "ok",
+                started,
+                result_count=1,
+            )
+        return "", _attempt("synthesis", provider.get_provider_name(), "empty", started)
+    except Exception as exc:
+        return "", _attempt_from_exception("synthesis", provider.get_provider_name(), started, exc)
+
+
 async def search(
     query: str,
     platform: str = "",
@@ -2674,19 +2835,646 @@ async def search(
     stream: bool | None = None,
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
-    from .search_v2 import run_search_v2
+    start = time.time()
+    session_id = new_session_id()
+    try:
+        effective_timeout = _resolve_search_timeout(timeout_seconds)
+        budget = SearchBudget(effective_timeout)
+        execution = SearchExecutionState(budget)
+        validation_level = (validation or config.validation_level).strip().lower()
+        fallback_mode = (fallback or config.fallback_mode).strip().lower()
+        if validation_level not in config._ALLOWED_VALIDATION_LEVELS:
+            raise ValueError(f"Invalid validation level: {validation_level}")
+        if fallback_mode not in config._ALLOWED_FALLBACK_MODES:
+            raise ValueError(f"Invalid fallback mode: {fallback_mode}")
+    except ValueError as e:
+        return _empty_search_result(
+            start,
+            session_id,
+            query,
+            "parameter_error",
+            str(e),
+            extra={"timeout_seconds": timeout_seconds},
+        )
 
-    return await run_search_v2(
-        query=query,
-        platform=platform,
-        model=model,
-        extra_sources=extra_sources,
-        validation=validation,
-        fallback=fallback,
-        providers=providers,
-        stream=stream,
-        timeout_seconds=timeout_seconds,
+    minimum = validate_minimum_profile()
+    if not minimum.get("ok"):
+        return _empty_search_result(
+            start,
+            session_id,
+            query,
+            minimum.get("error_type", "config_error"),
+            minimum.get("error", MINIMUM_PROFILE_ERROR),
+            extra={
+                "capability_status": minimum.get("capability_status", {}),
+                "minimum_profile_ok": False,
+                "validation_level": validation_level,
+                **execution.telemetry(),
+            },
+        )
+
+    try:
+        main_provider_configs = _main_search_provider_configs(model_override=model, providers=providers)
+    except ValueError as e:
+        return _empty_search_result(
+            start,
+            session_id,
+            query,
+            "parameter_error",
+            str(e),
+            extra={"validation_level": validation_level, **execution.telemetry()},
+        )
+
+    if not main_provider_configs:
+        return _empty_search_result(
+            start,
+            session_id,
+            query,
+            "config_error",
+            "No configured main_search provider matches --providers.",
+            extra={
+                "validation_level": validation_level,
+                "capability_status": minimum.get("capability_status", {}),
+                "minimum_profile_ok": minimum.get("ok", False),
+                **execution.telemetry(),
+            },
+        )
+
+    primary_api_mode = main_provider_configs[0]["mode"]
+    if stream is not None:
+        for provider_config in main_provider_configs:
+            if provider_config["provider"] == "openai-compatible":
+                provider_config["stream"] = stream
+
+    has_tavily = _provider_configured("tavily")
+    has_firecrawl = _provider_configured("firecrawl")
+    tavily_count = 0
+    firecrawl_count = 0
+    if extra_sources > 0:
+        if has_tavily and has_firecrawl:
+            tavily_count = max(1, round(extra_sources * 0.6))
+            firecrawl_count = extra_sources - tavily_count
+        elif has_tavily:
+            tavily_count = extra_sources
+        elif has_firecrawl:
+            firecrawl_count = extra_sources
+
+    selected_main_provider_configs = main_provider_configs if fallback_mode != "off" else main_provider_configs[:1]
+    router = IntentRouter(config)
+    try:
+        router_mode = config.intent_router_mode
+        router_has_remote = router_mode == "hybrid" and (
+            bool(config.intent_embedding_api_url and config.intent_embedding_api_key and config.intent_embedding_model)
+            or bool(config.intent_classifier_api_url and config.intent_classifier_api_key and config.intent_classifier_model)
+        )
+        if router_has_remote:
+            router_cap = budget.router_cap_seconds(config.intent_router_timeout)
+            route_ok, route_result = await _run_budgeted_phase(
+                lambda: router.route(query, validation_level=validation_level, allow_remote=True),
+                budget,
+                execution,
+                "router",
+                max_seconds=router_cap,
+                timeout_reason="router phase reached its shared cap; using local rules",
+                details={
+                    "main_search_reserve_ms": round(budget.main_reserve_seconds() * 1000, 2),
+                    "configured_timeout_ms": round(config.intent_router_timeout * 1000, 2),
+                },
+            )
+            if not route_ok:
+                route_result = await router.route(query, validation_level=validation_level, allow_remote=False)
+                route_result.intent_router_mode = router_mode
+                route_result.degraded = True
+                degraded_reason = "router phase reached its shared cap; using local rules"
+                route_result.degraded_reason = "; ".join(
+                    reason for reason in (route_result.degraded_reason, degraded_reason) if reason
+                )
+                route_result.reasons.append(degraded_reason)
+        else:
+            router_start = time.monotonic()
+            route_result = await router.route(query, validation_level=validation_level, allow_remote=True)
+            execution.record(
+                "router",
+                "ok",
+                router_start,
+                0.0,
+                details={"remote_components_configured": False},
+            )
+    except ValueError as e:
+        return _empty_search_result(
+            start,
+            session_id,
+            query,
+            "parameter_error",
+            str(e),
+            extra={"validation_level": validation_level, **execution.telemetry()},
+        )
+    fetch_urls = _extract_urls(query)
+    supplemental_paths = route_result.required_capabilities
+    openai_candidate_models = next(
+        (
+            [candidate["model"] for candidate in _openai_model_candidates(item, fallback_mode=fallback_mode, model_override=model)]
+            for item in selected_main_provider_configs
+            if item["provider"] == "openai-compatible"
+        ),
+        [],
     )
+    routing_decision = {
+        **route_result.to_dict(),
+        "validation_level": validation_level,
+        "fallback_mode": fallback_mode,
+        "providers": providers,
+        "main_search_chain": [item["provider"] for item in selected_main_provider_configs],
+        "openai_compatible_stream": next((bool(item.get("stream")) for item in selected_main_provider_configs if item["provider"] == "openai-compatible"), False),
+        "openai_compatible_api_mode": next((item.get("api_mode", item.get("mode", "")) for item in selected_main_provider_configs if item["provider"] == "openai-compatible"), ""),
+        "openai_compatible_models": openai_candidate_models,
+        "openai_compatible_model_fallback_enabled": len(openai_candidate_models) > 1,
+        "openai_compatible_timeout_policy": OPENAI_COMPATIBLE_TIMEOUT_POLICY,
+        "search_timeout_seconds": effective_timeout,
+        "main_search_reserve_seconds": round(budget.main_reserve_seconds(), 3),
+    }
+
+    provider_attempts: list[dict] = []
+    primary_start = time.time()
+    main_phase_start = time.monotonic()
+    main_phase_budget = budget.remaining_seconds()
+    primary_result = None
+    successful_main_config: dict[str, Any] | None = None
+    last_primary_error: dict[str, Any] | None = None
+    model_fallback_used = False
+    transport_fallback_used = False
+    main_timed_out = False
+    for provider_config in selected_main_provider_configs:
+        provider_candidates = (
+            _openai_model_candidates(provider_config, fallback_mode=fallback_mode, model_override=model)
+            if provider_config["provider"] == "openai-compatible"
+            else [provider_config]
+        )
+        for candidate_config in provider_candidates:
+            attempt_timeout = budget.remaining_seconds()
+            if attempt_timeout <= 0:
+                main_timed_out = True
+                break
+            primary_start = time.time()
+            search_provider = _main_search_providers([candidate_config], fallback="auto")[0]
+            attempt_extra: dict[str, Any] = {}
+            if candidate_config["provider"] == "openai-compatible":
+                attempt_extra["model"] = candidate_config["model"]
+                attempt_extra["model_role"] = candidate_config.get("model_role", "primary")
+                attempt_extra["stream"] = bool(candidate_config.get("stream", False))
+                attempt_extra["api_mode"] = candidate_config.get("api_mode", candidate_config.get("mode", "chat-completions"))
+                attempt_extra["endpoint"] = openai_compatible_endpoint(
+                    candidate_config["api_url"],
+                    attempt_extra["api_mode"],
+                )
+                if candidate_config.get("fallback_from_model"):
+                    attempt_extra["fallback_from_model"] = candidate_config["fallback_from_model"]
+                    model_fallback_used = True
+                breaker_state = _openai_model_breaker_state(
+                    candidate_config["api_url"],
+                    candidate_config["model"],
+                    attempt_extra["api_mode"],
+                )
+                if breaker_state.get("state") == "open":
+                    attempt_extra["breaker_state"] = breaker_state
+                    provider_attempts.append(
+                        _attempt(
+                            "main_search",
+                            "OpenAI-compatible",
+                            "skipped",
+                            primary_start,
+                            error_type="network_error",
+                            error="model breaker open",
+                            extra=attempt_extra,
+                        )
+                    )
+                    continue
+            attempt_timeout = max(0.001, attempt_timeout)
+            attempt_extra["attempt_timeout_seconds"] = round(attempt_timeout, 3)
+            set_deadline = getattr(search_provider, "set_search_deadline", None)
+            if callable(set_deadline):
+                set_deadline(budget.deadline)
+            candidate_task = asyncio.create_task(search_provider.search(query, platform))
+            try:
+                candidate_result = await asyncio.wait_for(candidate_task, timeout=attempt_timeout)
+                transport_attempts = getattr(search_provider, "last_transport_attempts", [])
+                if _append_openai_transport_attempts(provider_attempts, search_provider, candidate_config, extra=attempt_extra):
+                    transport_fallback_used = transport_fallback_used or any(
+                        attempt.get("fallback_from_transport") for attempt in transport_attempts
+                    )
+                if candidate_result:
+                    primary_result = candidate_result
+                    successful_main_config = candidate_config
+                    if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                        provider_attempts.append(
+                            _attempt(
+                                "main_search",
+                                search_provider.get_provider_name(),
+                                "ok",
+                                primary_start,
+                                result_count=1,
+                                extra=attempt_extra,
+                            )
+                        )
+                    if candidate_config["provider"] == "openai-compatible":
+                        _record_openai_model_success(
+                            candidate_config["api_url"],
+                            candidate_config["model"],
+                            candidate_config.get("api_mode", candidate_config.get("mode", "chat-completions")),
+                        )
+                    break
+                if candidate_config["provider"] == "openai-compatible":
+                    attempt_extra["breaker_state"] = _record_openai_model_failure(
+                        candidate_config["api_url"],
+                        candidate_config["model"],
+                        candidate_config.get("api_mode", candidate_config.get("mode", "chat-completions")),
+                    )
+                last_primary_error = _primary_search_error_result(
+                    start,
+                    session_id,
+                    query,
+                    candidate_config["mode"],
+                    "network_error",
+                    f"{search_provider.get_provider_name()} 返回空结果",
+                )
+                if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                    provider_attempts.append(
+                        _attempt("main_search", search_provider.get_provider_name(), "empty", primary_start, extra=attempt_extra)
+                    )
+            except Exception as e:
+                error_result = _primary_search_exception_result(start, session_id, query, candidate_config["mode"], search_provider.get_provider_name(), e)
+                last_primary_error = error_result
+                transport_attempts = getattr(search_provider, "last_transport_attempts", [])
+                if _append_openai_transport_attempts(provider_attempts, search_provider, candidate_config, extra=attempt_extra):
+                    transport_fallback_used = transport_fallback_used or any(
+                        attempt.get("fallback_from_transport") for attempt in transport_attempts
+                    )
+                if candidate_config["provider"] == "openai-compatible":
+                    attempt_extra["breaker_state"] = _record_openai_model_failure(
+                        candidate_config["api_url"],
+                        candidate_config["model"],
+                        candidate_config.get("api_mode", candidate_config.get("mode", "chat-completions")),
+                    )
+                if candidate_config["provider"] != "openai-compatible" or not transport_attempts:
+                    provider_attempts.append(
+                        _attempt(
+                            "main_search",
+                            search_provider.get_provider_name(),
+                            "error",
+                            primary_start,
+                            error_type=error_result["error_type"],
+                            error=error_result["error"],
+                            extra=attempt_extra,
+                        )
+                    )
+                if isinstance(e, asyncio.TimeoutError) and (
+                    candidate_task.cancelled() or budget.remaining_seconds() <= 0
+                ):
+                    main_timed_out = True
+                    break
+        if main_timed_out:
+            break
+        if primary_result is not None:
+            break
+    if primary_result is None:
+        terminal_timeout = main_timed_out or budget.remaining_seconds() <= 0
+        if terminal_timeout:
+            execution.record(
+                "main_search",
+                "timeout",
+                main_phase_start,
+                main_phase_budget,
+                "main_search phase exhausted the shared search deadline",
+                {"main_search_reserve_ms": round(budget.main_reserve_seconds() * 1000, 2)},
+            )
+            if last_primary_error and last_primary_error.get("error_type") == "timeout":
+                result = last_primary_error
+            else:
+                result = _primary_search_error_result(
+                    start,
+                    session_id,
+                    query,
+                    primary_api_mode,
+                    "timeout",
+                    "Search deadline exhausted during main_search.",
+                )
+        else:
+            execution.record("main_search", "error", main_phase_start, main_phase_budget)
+            result = last_primary_error or _primary_search_error_result(
+                start,
+                session_id,
+                query,
+                primary_api_mode,
+                "network_error",
+                "搜索失败或无结果",
+            )
+        result["provider_attempts"] = provider_attempts
+        result["providers_used"] = _provider_names_from_attempts(provider_attempts)
+        result["fallback_used"] = _fallback_used(provider_attempts)
+        result["transport_fallback_used"] = transport_fallback_used
+        result["model_fallback_used"] = model_fallback_used
+        result["routing_decision"] = routing_decision
+        result["validation_level"] = validation_level
+        result["minimum_profile_ok"] = minimum.get("ok", False)
+        result["capability_status"] = minimum.get("capability_status", {})
+        result.update(execution.telemetry())
+        return result
+
+    successful_main_config = successful_main_config or selected_main_provider_configs[0]
+    execution.record(
+        "main_search",
+        "ok",
+        main_phase_start,
+        main_phase_budget,
+        details={"main_search_reserve_ms": round(budget.main_reserve_seconds() * 1000, 2)},
+    )
+    primary_api_mode = successful_main_config["mode"]
+    effective_model = successful_main_config["model"]
+
+    extra_calls: list[tuple[str, Any]] = []
+    if tavily_count and _provider_health_status("tavily").get("state") != "cooldown":
+        extra_calls.append(("tavily", lambda: call_tavily_search(query, tavily_count)))
+    if firecrawl_count and _provider_health_status("firecrawl").get("state") != "cooldown":
+        extra_calls.append(("firecrawl", lambda: call_firecrawl_search(query, firecrawl_count)))
+
+    gathered = await _collect_extra_source_calls(extra_calls, budget, execution)
+    primary_result = primary_result or ""
+    tavily_results: list[dict] | None = None
+    firecrawl_results: list[dict] | None = None
+    for provider, attempt_start, result in gathered:
+        if isinstance(result, BaseException):
+            provider_attempts.append(_attempt_from_exception("web_search", provider, attempt_start, result))
+            continue
+        if result:
+            if provider == "tavily":
+                tavily_results = result
+            else:
+                firecrawl_results = result
+            provider_attempts.append(_attempt("web_search", provider, "ok", attempt_start, result_count=len(result)))
+        else:
+            provider_attempts.append(_attempt("web_search", provider, "empty", attempt_start))
+
+    answer, primary_sources = split_answer_and_sources(primary_result)
+    extra_source_items = extra_results_to_sources(tavily_results, firecrawl_results)
+
+    supplemental_sources: list[dict] = []
+    supplemental_by_capability: dict[str, list[dict]] = {}
+    if validation_level in {"balanced", "strict"} and supplemental_paths:
+        route_plan = _research_capability_routes(
+            query,
+            {"intent_signals": dict(route_result.intent_signals)},
+            fallback_mode,
+            route_result=route_result,
+        )
+        routing_decision["provider_routes"] = route_plan.get("capabilities", {})
+
+        async def run_supplemental(capability: str) -> tuple[bool, Any]:
+            if capability == "docs_search":
+                order = route_plan["capabilities"]["docs_search"]["providers"]
+                provider_arg = providers if providers != "auto" else ",".join(order) or "auto"
+                return await _run_budgeted_phase(
+                    lambda: _run_docs_search_fallback(
+                        query,
+                        providers=provider_arg,
+                        fallback=fallback_mode,
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional docs_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "web_search":
+                order = route_plan["capabilities"]["web_search"]["providers"]
+                if providers == "auto" and order:
+                    operation = lambda: _run_web_search_hedged(
+                        query,
+                        count=max(1, extra_sources or 3),
+                        provider_order=order,
+                        fallback=fallback_mode,
+                        validation=validation_level,
+                    )
+                else:
+                    operation = lambda: _run_web_search_fallback(
+                        query,
+                        count=max(1, extra_sources or 3),
+                        providers=providers if providers != "auto" else "auto",
+                        fallback=fallback_mode,
+                    )
+                return await _run_budgeted_phase(
+                    operation,
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional web_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "web_fetch":
+                fetch_url = fetch_urls[0] if fetch_urls else query.strip()
+                return await _run_budgeted_phase(
+                    lambda: _run_web_fetch_fallback(
+                        fetch_url,
+                        fallback=fallback_mode,
+                        preferred_order=_research_fetch_order(query, fetch_url),
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional web_fetch reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            if capability == "vertical_search":
+                order = route_plan["capabilities"]["vertical_search"]["providers"]
+                provider_arg = providers if providers != "auto" else ",".join(order) or "auto"
+                return await _run_budgeted_phase(
+                    lambda: _run_vertical_search_fallback(
+                        query,
+                        providers=provider_arg,
+                        fallback=fallback_mode,
+                    ),
+                    budget,
+                    execution,
+                    "supplemental",
+                    timeout_reason="optional vertical_search reached the shared search deadline",
+                    details={"capability": capability},
+                )
+            return False, None
+
+        capabilities = [capability for capability in supplemental_paths if capability in ROUTABLE_CAPABILITIES]
+        outcomes = await asyncio.gather(
+            *(run_supplemental(capability) for capability in capabilities),
+            return_exceptions=True,
+        )
+        for capability, outcome in zip(capabilities, outcomes):
+            if isinstance(outcome, BaseException):
+                continue
+            phase_ok, phase_result = outcome
+            if not phase_ok or not phase_result:
+                continue
+            if capability == "web_fetch":
+                fetch_result, fetch_attempts = phase_result
+                provider_attempts.extend(fetch_attempts)
+                if fetch_result:
+                    source = {
+                        "url": fetch_result["url"],
+                        "provider": fetch_result["provider"],
+                        "description": fetch_result["content"][:1200],
+                        "verified_content": fetch_result["content"],
+                        "verified": True,
+                    }
+                    supplemental_sources.append(source)
+                    supplemental_by_capability[capability] = [source]
+                continue
+            cap_sources, cap_attempts = phase_result
+            provider_attempts.extend(cap_attempts)
+            supplemental_sources.extend(cap_sources)
+            supplemental_by_capability[capability] = cap_sources
+
+    extra_source_items = merge_sources(extra_source_items, supplemental_sources)
+    sources = merge_sources(primary_sources, extra_source_items)
+    optional_phase_limited = any(
+        attempt.get("phase") in {"extra_sources", "supplemental"}
+        and attempt.get("status") in {"timeout", "skipped"}
+        for attempt in execution.phase_attempts
+    )
+
+    evidence_groups = _evidence_groups_from_sources(
+        primary_sources,
+        capability="main_search",
+        query=query,
+        default_provider=successful_main_config.get("provider", "main_search"),
+    )
+    evidence_groups.extend(
+        _evidence_groups_from_sources(
+            extra_results_to_sources(tavily_results, firecrawl_results),
+            capability="web_search",
+            query=query,
+        )
+    )
+    for capability, cap_sources in supplemental_by_capability.items():
+        evidence_groups.extend(
+            _evidence_groups_from_sources(
+                cap_sources,
+                capability=capability,
+                query=query,
+            )
+        )
+    evidence = fuse_source_groups(evidence_groups)
+
+    if validation_level == "strict" and evidence and not optional_phase_limited:
+        fetch_candidates = [
+            item
+            for item in evidence
+            if not item.get("verified")
+            and str(item.get("url") or "").startswith(("http://", "https://"))
+        ][:3]
+
+        async def fetch_evidence_item(item: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict]]:
+            return await _run_web_fetch_fallback(
+                str(item.get("url") or ""),
+                fallback=fallback_mode,
+                preferred_order=_research_fetch_order(query, str(item.get("url") or "")),
+            )
+
+        if fetch_candidates:
+            fetch_outcomes = await asyncio.gather(
+                *(fetch_evidence_item(item) for item in fetch_candidates),
+                return_exceptions=True,
+            )
+            fetched_items: list[dict[str, Any]] = []
+            for candidate, outcome in zip(fetch_candidates, fetch_outcomes):
+                if isinstance(outcome, BaseException):
+                    continue
+                fetch_result, fetch_attempts = outcome
+                provider_attempts.extend(fetch_attempts)
+                if fetch_result:
+                    fetched_items.append(
+                        {
+                            "url": fetch_result["url"],
+                            "title": candidate.get("title") or fetch_result["url"],
+                            "content": fetch_result["content"],
+                            "provider": fetch_result["provider"],
+                        }
+                    )
+            mark_fetched(evidence, fetched_items)
+
+    verification_query = any(
+        token in query.lower()
+        for token in ("核验", "验证", "真假", "verify", "fact check", "是否真的")
+    )
+    assessment = evidence_assessment(
+        evidence,
+        validation=validation_level,
+        primary_capability=route_result.primary_capability or "main_search",
+        known_url=bool(fetch_urls),
+        verification_query=verification_query,
+    )
+
+    synthesis_grounded = False
+    if (
+        validation_level in {"balanced", "strict"}
+        and assessment.get("sufficient")
+        and any(item.get("verified") for item in evidence)
+        and budget.remaining_seconds() > 0
+    ):
+        synthesis_start = time.monotonic()
+        synthesized, synthesis_attempt = await _synthesize_from_evidence(
+            query,
+            evidence,
+            assessment,
+            successful_main_config,
+            budget,
+        )
+        if synthesis_attempt:
+            provider_attempts.append(synthesis_attempt)
+        if synthesized:
+            answer = synthesized
+            synthesis_grounded = True
+        execution.record(
+            "synthesis",
+            "ok" if synthesized else "error",
+            synthesis_start,
+            budget.remaining_seconds(),
+            details={"grounded": bool(synthesized)},
+        )
+
+    ok = bool(answer or sources)
+    if validation_level == "strict" and not assessment.get("sufficient"):
+        ok = False
+    return {
+        "ok": ok,
+        "error_type": "" if ok else ("evidence_error" if validation_level == "strict" else "network_error"),
+        "error": "" if ok else ("strict 模式证据不足" if validation_level == "strict" else "搜索失败或无结果"),
+        "session_id": session_id,
+        "query": query,
+        "platform": platform,
+        "model": effective_model,
+        "primary_api_mode": primary_api_mode,
+        "content": answer,
+        "sources": sources,
+        "sources_count": len(sources),
+        "primary_sources": primary_sources,
+        "primary_sources_count": len(primary_sources),
+        "extra_sources": extra_source_items,
+        "extra_sources_count": len(extra_source_items),
+        "source_warning": "" if synthesis_grounded else (SOURCE_PROVENANCE_WARNING if extra_source_items else ""),
+        "routing_decision": routing_decision,
+        "evidence_assessment": assessment,
+        "synthesis": {
+            "grounded": synthesis_grounded,
+            "provider": successful_main_config.get("provider", "") if synthesis_grounded else "",
+        },
+        "providers_used": _provider_names_from_attempts(provider_attempts),
+        "provider_attempts": provider_attempts,
+        "fallback_used": _fallback_used(provider_attempts),
+        "transport_fallback_used": transport_fallback_used,
+        "model_fallback_used": model_fallback_used,
+        "validation_level": validation_level,
+        "minimum_profile_ok": minimum.get("ok", False),
+        "capability_status": minimum.get("capability_status", {}),
+        "elapsed_ms": _elapsed_ms(start),
+        **execution.telemetry(partial_success=bool(primary_result and optional_phase_limited)),
+    }
 
 
 async def route(

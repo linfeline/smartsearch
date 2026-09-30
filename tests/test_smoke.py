@@ -250,8 +250,12 @@ async def test_search_docs_intent_uses_docs_fallback(monkeypatch):
     async def fake_context7(name, query=""):
         return {"ok": True, "results": [{"id": "/reactjs/react.dev", "title": "React", "description": "UI"}], "total": 1}
 
+    async def fake_context7_docs(library_id, query):
+        return {"ok": True, "library_id": library_id, "content": f"Verified docs for {query}"}
+
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "context7_library", fake_context7)
+    monkeypatch.setattr(service, "context7_docs", fake_context7_docs)
 
     result = await service.search("React useEffect API docs", validation="balanced")
 

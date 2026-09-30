@@ -1798,11 +1798,24 @@ async def test_zhipu_mcp_web_search_error_records_attempt_and_falls_back_same_ca
         }
 
     async def yes_tavily(query, max_results=6):
-        return [{"url": "https://fallback.example.com", "title": "Fallback", "content": "fallback source"}]
+        return [
+            {"url": "https://fallback.example.com", "title": "Fallback", "content": "fallback source"},
+            {"url": "https://independent.example.org", "title": "Independent", "content": "second source"},
+        ]
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        del fallback, preferred_order
+        return {
+            "ok": True,
+            "url": url,
+            "provider": "tavily",
+            "content": f"verified body for {url}",
+        }, []
 
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "zhipu_mcp_search", failing_zhipu_mcp)
     monkeypatch.setattr(service, "call_tavily_search", yes_tavily)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
 
     result = await service.search("latest MCP status", validation="strict")
 
@@ -1931,10 +1944,23 @@ async def test_strict_still_uses_web_search_without_current_keyword(monkeypatch)
         return "Strict answer."
 
     async def fake_tavily_search(query, max_results=6):
-        return [{"url": "https://strict.example.com", "title": "Strict", "content": "evidence"}]
+        return [
+            {"url": "https://strict.example.com", "title": "Strict", "content": "evidence"},
+            {"url": "https://independent.example.org", "title": "Independent", "content": "second evidence"},
+        ]
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        del fallback, preferred_order
+        return {
+            "ok": True,
+            "url": url,
+            "provider": "tavily",
+            "content": f"verified body for {url}",
+        }, []
 
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "call_tavily_search", fake_tavily_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
 
     result = await service.search("plain evergreen query", validation="strict")
 
@@ -1942,6 +1968,81 @@ async def test_strict_still_uses_web_search_without_current_keyword(monkeypatch)
     assert result["routing_decision"]["web_current_intent"] is False
     assert "web_search" in result["routing_decision"]["supplemental_paths"]
     assert any(attempt["capability"] == "web_search" and attempt["status"] == "ok" for attempt in result["provider_attempts"])
+
+
+@pytest.mark.asyncio
+async def test_balanced_supplemental_capabilities_start_concurrently(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Draft answer."
+
+    docs_started = asyncio.Event()
+    web_started = asyncio.Event()
+
+    async def fake_docs(query, providers="auto", fallback="auto"):
+        docs_started.set()
+        await asyncio.wait_for(web_started.wait(), timeout=0.2)
+        return [{"url": "https://docs.example.com", "provider": "exa"}], []
+
+    async def fake_web(query, *, count, provider_order, fallback, validation):
+        web_started.set()
+        await asyncio.wait_for(docs_started.wait(), timeout=0.2)
+        return [{"url": "https://web.example.com", "provider": "tavily"}], []
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "_run_docs_search_fallback", fake_docs)
+    monkeypatch.setattr(service, "_run_web_search_hedged", fake_web)
+
+    result = await service.search("React 19 最新官方文档", validation="balanced")
+
+    assert result["ok"] is True
+    assert docs_started.is_set()
+    assert web_started.is_set()
+
+
+@pytest.mark.asyncio
+async def test_balanced_web_hedge_returns_fast_backup_and_cancels_slow_primary(monkeypatch):
+    monkeypatch.setattr(service, "WEB_SEARCH_HEDGE_DELAY_SECONDS", 0.01)
+    primary_cancelled = False
+
+    async def fake_fallback(query, count=5, providers="auto", fallback="auto"):
+        nonlocal primary_cancelled
+        if providers == "slow":
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                primary_cancelled = True
+                raise
+            return [], []
+        return [{"url": "https://fast.example.com", "provider": providers}], [
+            {
+                "capability": "web_search",
+                "provider": providers,
+                "status": "ok",
+                "elapsed_ms": 1,
+                "result_count": 1,
+            }
+        ]
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_fallback)
+    started = time.monotonic()
+    sources, attempts = await service._run_web_search_hedged(
+        "query",
+        count=3,
+        provider_order=["slow", "fast"],
+        fallback="auto",
+        validation="balanced",
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert sources[0]["url"] == "https://fast.example.com"
+    assert attempts[-1]["hedged"] is True
+    assert primary_cancelled is True
 
 
 @pytest.mark.asyncio

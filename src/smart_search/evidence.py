@@ -128,6 +128,7 @@ def evidence_assessment(
         1 for item in verified
         if item.get("capability") == "docs_search" or str(item.get("url") or "").startswith("context7:")
     )
+    gaps: list[str] = []
     if validation == "fast":
         sufficient = bool(evidence)
     elif known_url:
@@ -140,6 +141,15 @@ def evidence_assessment(
         sufficient = len(verified) >= 1 and (authoritative >= 1 or len(domains) >= 2)
     else:
         sufficient = bool(verified) or len(evidence) >= 2
+    if not sufficient:
+        if not verified:
+            gaps.append("needs_verified_content")
+        if validation == "strict" and verification_query and len(domains) < 2 and authoritative < 1:
+            gaps.append("needs_second_independent_source")
+        elif validation == "strict" and authoritative < 1 and len(domains) < 2:
+            gaps.append("needs_authoritative_or_second_source")
+        if not evidence:
+            gaps.append("needs_search_results")
     return {
         "sufficient": bool(sufficient),
         "useful_sources": len(evidence),
@@ -147,7 +157,7 @@ def evidence_assessment(
         "independent_domains": len(domains),
         "authoritative_count": authoritative,
         "coverage_score": round(min(1.0, len(verified) * 0.35 + len(domains) * 0.2 + authoritative * 0.25), 3),
-        "gaps": [] if sufficient else ["insufficient verified evidence for selected validation level"],
+        "gaps": gaps,
     }
 
 

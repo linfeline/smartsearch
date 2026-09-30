@@ -2046,6 +2046,162 @@ async def test_balanced_web_hedge_returns_fast_backup_and_cancels_slow_primary(m
 
 
 @pytest.mark.asyncio
+async def test_strict_web_hedge_skips_backup_when_primary_has_domain_diversity(monkeypatch):
+    calls = []
+
+    async def fake_fallback(query, count=5, providers="auto", fallback="auto"):
+        calls.append(providers)
+        if providers == "primary":
+            return [
+                {"url": "https://a.example.com/one", "provider": providers},
+                {"url": "https://b.example.org/two", "provider": providers},
+            ], [{
+                "capability": "web_search",
+                "provider": providers,
+                "status": "ok",
+                "elapsed_ms": 1,
+                "result_count": 2,
+            }]
+        raise AssertionError("backup should not run when strict primary already has two domains")
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_fallback)
+    sources, attempts = await service._run_web_search_hedged(
+        "query",
+        count=3,
+        provider_order=["primary", "backup"],
+        fallback="auto",
+        validation="strict",
+    )
+
+    assert calls == ["primary"]
+    assert len(sources) == 2
+    assert attempts[0]["provider"] == "primary"
+
+
+@pytest.mark.asyncio
+async def test_strict_web_hedge_cancels_slow_primary_when_backup_is_sufficient(monkeypatch):
+    monkeypatch.setattr(service, "WEB_SEARCH_HEDGE_DELAY_SECONDS", 0.01)
+    primary_cancelled = False
+
+    async def fake_fallback(query, count=5, providers="auto", fallback="auto"):
+        nonlocal primary_cancelled
+        if providers == "slow":
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                primary_cancelled = True
+                raise
+            return [], []
+        return [
+            {"url": "https://a.example.com/one", "provider": providers},
+            {"url": "https://b.example.org/two", "provider": providers},
+        ], [{
+            "capability": "web_search",
+            "provider": providers,
+            "status": "ok",
+            "elapsed_ms": 1,
+            "result_count": 2,
+        }]
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_fallback)
+    started = time.monotonic()
+    sources, attempts = await service._run_web_search_hedged(
+        "query",
+        count=3,
+        provider_order=["slow", "fast"],
+        fallback="auto",
+        validation="strict",
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.2
+    assert len(sources) == 2
+    assert attempts[-1]["hedged"] is True
+    assert primary_cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_strict_fetch_early_stop_skips_third_candidate_after_two_verified_domains(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "off")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    fetch_calls = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Draft answer."
+
+    async def fake_web(query, *, count, provider_order, fallback, validation):
+        return [
+            {"url": "https://a.example.com/evidence", "provider": "fast"},
+            {"url": "https://b.example.org/evidence", "provider": "fast"},
+            {"url": "https://c.example.net/evidence", "provider": "fast"},
+        ], [{
+            "capability": "web_search",
+            "provider": "fast",
+            "status": "ok",
+            "elapsed_ms": 1,
+            "result_count": 3,
+        }]
+
+    async def fake_fetch(url, fallback="auto", preferred_order=None):
+        fetch_calls.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "provider": "tavily",
+            "content": f"verified body for {url}",
+        }, []
+
+    async def fake_synthesis(*args, **kwargs):
+        return "Grounded answer.", None
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(
+        service,
+        "_main_search_provider_configs",
+        lambda **kwargs: [{
+            "provider": "openai-compatible",
+            "mode": "chat-completions",
+            "api_mode": "chat-completions",
+            "api_url": "https://relay.example.com/v1",
+            "api_key": "relay-test-secret",
+            "model": "test-model",
+            "stream": False,
+            "tools": [],
+        }],
+    )
+    monkeypatch.setattr(service, "_run_web_search_hedged", fake_web)
+    monkeypatch.setattr(
+        service,
+        "_research_capability_routes",
+        lambda *args, **kwargs: {
+            "capabilities": {
+                "web_search": {"providers": ["primary", "backup"]},
+                "docs_search": {"providers": []},
+                "web_fetch": {"providers": []},
+                "vertical_search": {"providers": []},
+            }
+        },
+    )
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+    monkeypatch.setattr(service, "_synthesize_from_evidence", fake_synthesis)
+
+    result = await service.search("核验 plain evergreen query 是否真的", validation="strict")
+
+    assert result["ok"] is True
+    assert len(fetch_calls) == 2
+    assert "https://c.example.net/evidence" not in fetch_calls
+    assert result["strict_scheduler"] == {
+        "early_stop": True,
+        "fetch_candidates": 3,
+        "fetch_completed": 2,
+        "fetch_skipped": 1,
+    }
+    assert result["evidence_assessment"]["sufficient"] is True
+    assert result["evidence_assessment"]["independent_domains"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_search_vertical_intent_uses_anysearch_when_configured(monkeypatch):
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")

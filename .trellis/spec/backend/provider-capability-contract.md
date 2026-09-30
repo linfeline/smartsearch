@@ -690,6 +690,17 @@ Output contracts:
   same capability must not be executed again as a post-main supplemental phase.
   If primary retrieval times out or yields no verified evidence, fall back to
   the normal main-search path. `strict` keeps its existing full evidence loop.
+- In `strict` mode, optional retrieval is evidence-driven rather than
+  exhaustively fixed. Web-search hedging may stop after the first provider when
+  its result set already spans at least two independent HTTP(S) domains. If a
+  hedge is started because the primary is slow, a hedged provider that reaches
+  the same diversity threshold may cancel the still-pending primary.
+- Strict evidence fetches must reassess sufficiency after each fetch wave. For
+  verification queries that still need an independent source, fetch up to two
+  candidates concurrently in the first wave; otherwise fetch one. Once
+  `evidence_assessment.sufficient` becomes true, skip remaining candidates and
+  proceed to synthesis. Early-stop must not weaken the existing strict
+  sufficiency rule.
 - `search` must expose the OpenAI-compatible model candidates used for the
   invocation in `routing_decision.openai_compatible_models` and whether model
   fallback was enabled in

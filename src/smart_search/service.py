@@ -2732,10 +2732,33 @@ async def _run_web_search_hedged(
             fallback="off",
         )
 
+    def source_domain_count(sources: list[dict]) -> int:
+        domains: set[str] = set()
+        for source in sources or []:
+            url = str(source.get("url") or "")
+            if not url.startswith(("http://", "https://")):
+                continue
+            try:
+                host = (urlparse(url).hostname or "").lower()
+            except ValueError:
+                host = ""
+            if host:
+                domains.add(host)
+        return len(domains)
+
     first = asyncio.create_task(run_one(selected[0]))
     second: asyncio.Task | None = None
     if validation == "strict":
-        second = asyncio.create_task(run_one(selected[1]))
+        try:
+            sources, attempts = await asyncio.wait_for(
+                asyncio.shield(first),
+                timeout=WEB_SEARCH_HEDGE_DELAY_SECONDS,
+            )
+            if sources and source_domain_count(sources) >= 2:
+                return sources, attempts
+            second = asyncio.create_task(run_one(selected[1]))
+        except asyncio.TimeoutError:
+            second = asyncio.create_task(run_one(selected[1]))
     else:
         try:
             sources, attempts = await asyncio.wait_for(
@@ -2772,6 +2795,33 @@ async def _run_web_search_hedged(
                         await asyncio.gather(*pending, return_exceptions=True)
                     return sources, merged_attempts
         return [], merged_attempts
+
+    if validation == "strict" and second is not None:
+        task_provider = {first: selected[0], second: selected[1]}
+        pending: set[asyncio.Task] = {first, second}
+        merged_sources: list[dict] = []
+        merged_attempts: list[dict] = []
+        while pending:
+            done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                provider = task_provider[task]
+                try:
+                    sources, attempts = task.result()
+                except BaseException as exc:
+                    merged_attempts.append(_attempt_from_exception("web_search", provider, time.time(), exc))
+                    continue
+                if provider == selected[1]:
+                    for attempt in attempts:
+                        attempt["hedged"] = True
+                merged_sources = merge_sources(merged_sources, sources)
+                merged_attempts.extend(attempts)
+                if source_domain_count(merged_sources) >= 2:
+                    for leftover in pending:
+                        leftover.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return merged_sources, merged_attempts
+        return merged_sources, merged_attempts
 
     outcomes = await asyncio.gather(first, second, return_exceptions=True)
     merged_sources: list[dict] = []
@@ -3467,6 +3517,15 @@ async def search(
         )
     evidence = fuse_source_groups(evidence_groups)
 
+    verification_query = any(
+        token in query.lower()
+        for token in ("核验", "验证", "真假", "verify", "fact check", "是否真的")
+    )
+    strict_fetch_requested = 0
+    strict_fetch_completed = 0
+    strict_fetch_skipped = 0
+    strict_early_stop = False
+
     if validation_level == "strict" and evidence and not optional_phase_limited:
         fetch_candidates = [
             item
@@ -3474,6 +3533,7 @@ async def search(
             if not item.get("verified")
             and str(item.get("url") or "").startswith(("http://", "https://"))
         ][:3]
+        strict_fetch_requested = len(fetch_candidates)
 
         async def fetch_evidence_item(item: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict]]:
             return await _run_web_fetch_fallback(
@@ -3483,31 +3543,81 @@ async def search(
             )
 
         if fetch_candidates:
-            fetch_outcomes = await asyncio.gather(
-                *(fetch_evidence_item(item) for item in fetch_candidates),
-                return_exceptions=True,
+            initial_assessment = evidence_assessment(
+                evidence,
+                validation=validation_level,
+                primary_capability=route_result.primary_capability or "main_search",
+                known_url=bool(fetch_urls),
+                verification_query=verification_query,
             )
-            fetched_items: list[dict[str, Any]] = []
-            for candidate, outcome in zip(fetch_candidates, fetch_outcomes):
-                if isinstance(outcome, BaseException):
-                    continue
-                fetch_result, fetch_attempts = outcome
-                provider_attempts.extend(fetch_attempts)
-                if fetch_result:
-                    fetched_items.append(
-                        {
-                            "url": fetch_result["url"],
-                            "title": candidate.get("title") or fetch_result["url"],
-                            "content": fetch_result["content"],
-                            "provider": fetch_result["provider"],
-                        }
-                    )
-            mark_fetched(evidence, fetched_items)
+            if initial_assessment.get("sufficient"):
+                strict_early_stop = True
+                strict_fetch_skipped = len(fetch_candidates)
+            else:
+                gaps = set(initial_assessment.get("gaps") or [])
+                first_wave_size = 2 if "needs_second_independent_source" in gaps else 1
+                first_wave = fetch_candidates[:first_wave_size]
+                remaining_candidates = fetch_candidates[first_wave_size:]
+                fetched_items: list[dict[str, Any]] = []
 
-    verification_query = any(
-        token in query.lower()
-        for token in ("核验", "验证", "真假", "verify", "fact check", "是否真的")
-    )
+                first_outcomes = await asyncio.gather(
+                    *(fetch_evidence_item(item) for item in first_wave),
+                    return_exceptions=True,
+                )
+                for candidate, outcome in zip(first_wave, first_outcomes):
+                    strict_fetch_completed += 1
+                    if isinstance(outcome, BaseException):
+                        continue
+                    fetch_result, fetch_attempts = outcome
+                    provider_attempts.extend(fetch_attempts)
+                    if fetch_result:
+                        fetched_items.append(
+                            {
+                                "url": fetch_result["url"],
+                                "title": candidate.get("title") or fetch_result["url"],
+                                "content": fetch_result["content"],
+                                "provider": fetch_result["provider"],
+                            }
+                        )
+                mark_fetched(evidence, fetched_items)
+
+                wave_assessment = evidence_assessment(
+                    evidence,
+                    validation=validation_level,
+                    primary_capability=route_result.primary_capability or "main_search",
+                    known_url=bool(fetch_urls),
+                    verification_query=verification_query,
+                )
+                if wave_assessment.get("sufficient"):
+                    strict_early_stop = True
+                    strict_fetch_skipped = len(remaining_candidates)
+                else:
+                    for candidate in remaining_candidates:
+                        outcome = await fetch_evidence_item(candidate)
+                        strict_fetch_completed += 1
+                        fetch_result, fetch_attempts = outcome
+                        provider_attempts.extend(fetch_attempts)
+                        if fetch_result:
+                            mark_fetched(
+                                evidence,
+                                [{
+                                    "url": fetch_result["url"],
+                                    "title": candidate.get("title") or fetch_result["url"],
+                                    "content": fetch_result["content"],
+                                    "provider": fetch_result["provider"],
+                                }],
+                            )
+                        wave_assessment = evidence_assessment(
+                            evidence,
+                            validation=validation_level,
+                            primary_capability=route_result.primary_capability or "main_search",
+                            known_url=bool(fetch_urls),
+                            verification_query=verification_query,
+                        )
+                        if wave_assessment.get("sufficient"):
+                            strict_early_stop = True
+                            strict_fetch_skipped = len(fetch_candidates) - strict_fetch_completed
+                            break
     assessment = evidence_assessment(
         evidence,
         validation=validation_level,
@@ -3571,6 +3681,12 @@ async def search(
         "synthesis": {
             "grounded": synthesis_grounded,
             "provider": successful_main_config.get("provider", "") if synthesis_grounded else "",
+        },
+        "strict_scheduler": {
+            "early_stop": strict_early_stop,
+            "fetch_candidates": strict_fetch_requested,
+            "fetch_completed": strict_fetch_completed,
+            "fetch_skipped": strict_fetch_skipped,
         },
         "providers_used": _provider_names_from_attempts(provider_attempts),
         "provider_attempts": provider_attempts,

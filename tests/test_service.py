@@ -2304,6 +2304,85 @@ async def test_search_known_url_uses_same_fetch_chain_as_fetch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_balanced_hard_docs_route_retrieves_before_single_grounded_main_call(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "off")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    captured = {"calls": 0, "query": ""}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        captured["calls"] += 1
+        captured["query"] = query
+        return "Grounded docs answer."
+
+    async def fake_docs(query, providers="auto", fallback="auto"):
+        return [{
+            "url": "context7:/reactjs/react.dev",
+            "title": "React",
+            "provider": "context7",
+            "description": "verified docs",
+            "verified_content": "React useEffect verified documentation body",
+            "verified": True,
+        }], [{
+            "capability": "docs_search",
+            "provider": "context7",
+            "status": "ok",
+            "elapsed_ms": 1,
+            "result_count": 1,
+        }]
+
+    async def should_not_synthesize_again(*args, **kwargs):
+        raise AssertionError("retrieval-first balanced route must not make a second synthesis call")
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "_run_docs_search_fallback", fake_docs)
+    monkeypatch.setattr(service, "_synthesize_from_evidence", should_not_synthesize_again)
+
+    result = await service.search("React useEffect API docs", validation="balanced")
+
+    assert result["ok"] is True
+    assert captured["calls"] == 1
+    assert "Answer the user using ONLY the evidence supplied below." in captured["query"]
+    assert "React useEffect verified documentation body" in captured["query"]
+    assert result["routing_decision"]["retrieval_first"] is True
+    assert result["routing_decision"]["retrieval_first_capability"] == "docs_search"
+    assert result["synthesis"]["grounded"] is True
+    assert result["extra_sources"][0]["provider"] == "context7"
+    assert not any(attempt["capability"] == "synthesis" for attempt in result["provider_attempts"])
+
+
+@pytest.mark.asyncio
+async def test_balanced_hard_route_prefetch_timeout_preserves_main_reserve(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_MINIMUM_PROFILE", "off")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+
+    async def slow_docs(query, providers="auto", fallback="auto"):
+        await asyncio.sleep(1)
+        return [], []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Fallback main answer."
+
+    monkeypatch.setattr(service, "_run_docs_search_fallback", slow_docs)
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+
+    result = await service.search(
+        "React useEffect API docs",
+        validation="balanced",
+        timeout_seconds=0.6,
+    )
+
+    prefetch = next(attempt for attempt in result["phase_attempts"] if attempt["phase"] == "primary_retrieval")
+    main = next(attempt for attempt in result["phase_attempts"] if attempt["phase"] == "main_search")
+    assert result["ok"] is True
+    assert result["content"] == "Fallback main answer."
+    assert prefetch["status"] == "timeout"
+    assert main["status"] == "ok"
+    assert result["routing_decision"].get("retrieval_first") is not True
+
+
+@pytest.mark.asyncio
 async def test_fetch_reports_config_error_without_extract_keys(monkeypatch):
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)

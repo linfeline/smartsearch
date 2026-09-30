@@ -2995,6 +2995,99 @@ async def search(
     }
 
     provider_attempts: list[dict] = []
+    pre_main_sources: list[dict[str, Any]] = []
+    pre_main_capability = ""
+    pre_main_grounded = False
+    main_query = query
+    main_platform = platform
+
+    if validation_level == "balanced" and route_result.hard_route:
+        pre_main_capability = route_result.primary_capability
+        prefetch_cap = max(0.0, budget.remaining_seconds() - budget.main_reserve_seconds())
+        prefetch_ok = False
+        prefetch_result: Any = None
+        if pre_main_capability == "docs_search":
+            route_plan = _research_capability_routes(
+                query,
+                {"intent_signals": dict(route_result.intent_signals)},
+                fallback_mode,
+                route_result=route_result,
+            )
+            order = route_plan["capabilities"]["docs_search"]["providers"]
+            provider_arg = providers if providers != "auto" else ",".join(order) or "auto"
+            prefetch_ok, prefetch_result = await _run_budgeted_phase(
+                lambda: _run_docs_search_fallback(
+                    query,
+                    providers=provider_arg,
+                    fallback=fallback_mode,
+                ),
+                budget,
+                execution,
+                "primary_retrieval",
+                max_seconds=prefetch_cap,
+                timeout_reason="primary retrieval reached its cap; falling back to normal main_search",
+                details={"capability": pre_main_capability},
+            )
+        elif pre_main_capability == "web_fetch" and fetch_urls:
+            fetch_url = fetch_urls[0]
+            prefetch_ok, prefetch_result = await _run_budgeted_phase(
+                lambda: _run_web_fetch_fallback(
+                    fetch_url,
+                    fallback=fallback_mode,
+                    preferred_order=_research_fetch_order(query, fetch_url),
+                ),
+                budget,
+                execution,
+                "primary_retrieval",
+                max_seconds=prefetch_cap,
+                timeout_reason="primary retrieval reached its cap; falling back to normal main_search",
+                details={"capability": pre_main_capability},
+            )
+
+        if prefetch_ok and prefetch_result:
+            if pre_main_capability == "web_fetch":
+                fetch_result, fetch_attempts = prefetch_result
+                provider_attempts.extend(fetch_attempts)
+                if fetch_result:
+                    pre_main_sources = [{
+                        "url": fetch_result["url"],
+                        "title": fetch_result["url"],
+                        "provider": fetch_result["provider"],
+                        "description": fetch_result["content"][:1200],
+                        "verified_content": fetch_result["content"],
+                        "verified": True,
+                    }]
+            else:
+                pre_main_sources, prefetch_attempts = prefetch_result
+                provider_attempts.extend(prefetch_attempts)
+
+        if pre_main_sources:
+            supplemental_paths = [
+                capability
+                for capability in supplemental_paths
+                if capability != pre_main_capability
+            ]
+            routing_decision["primary_retrieval_reused"] = True
+            pre_groups = _evidence_groups_from_sources(
+                pre_main_sources,
+                capability=pre_main_capability,
+                query=query,
+            )
+            pre_evidence = fuse_source_groups(pre_groups)
+            pre_assessment = evidence_assessment(
+                pre_evidence,
+                validation=validation_level,
+                primary_capability=pre_main_capability,
+                known_url=bool(fetch_urls),
+                verification_query=False,
+            )
+            if pre_assessment.get("sufficient") and any(item.get("verified") for item in pre_evidence):
+                main_query = build_evidence_prompt(query, pre_evidence, pre_assessment)
+                main_platform = ""
+                pre_main_grounded = True
+                routing_decision["retrieval_first"] = True
+                routing_decision["retrieval_first_capability"] = pre_main_capability
+
     primary_start = time.time()
     main_phase_start = time.monotonic()
     main_phase_budget = budget.remaining_seconds()
@@ -3016,7 +3109,10 @@ async def search(
                 main_timed_out = True
                 break
             primary_start = time.time()
-            search_provider = _main_search_providers([candidate_config], fallback="auto")[0]
+            call_config = dict(candidate_config)
+            if pre_main_grounded:
+                call_config["tools"] = []
+            search_provider = _main_search_providers([call_config], fallback="auto")[0]
             attempt_extra: dict[str, Any] = {}
             if candidate_config["provider"] == "openai-compatible":
                 attempt_extra["model"] = candidate_config["model"]
@@ -3054,7 +3150,7 @@ async def search(
             set_deadline = getattr(search_provider, "set_search_deadline", None)
             if callable(set_deadline):
                 set_deadline(budget.deadline)
-            candidate_task = asyncio.create_task(search_provider.search(query, platform))
+            candidate_task = asyncio.create_task(search_provider.search(main_query, main_platform))
             try:
                 candidate_result = await asyncio.wait_for(candidate_task, timeout=attempt_timeout)
                 transport_attempts = getattr(search_provider, "last_transport_attempts", [])
@@ -3216,6 +3312,8 @@ async def search(
 
     answer, primary_sources = split_answer_and_sources(primary_result)
     extra_source_items = extra_results_to_sources(tavily_results, firecrawl_results)
+    if pre_main_sources:
+        extra_source_items = merge_sources(extra_source_items, pre_main_sources)
 
     supplemental_sources: list[dict] = []
     supplemental_by_capability: dict[str, list[dict]] = {}
@@ -3351,6 +3449,14 @@ async def search(
             query=query,
         )
     )
+    if pre_main_sources:
+        evidence_groups.extend(
+            _evidence_groups_from_sources(
+                pre_main_sources,
+                capability=pre_main_capability,
+                query=query,
+            )
+        )
     for capability, cap_sources in supplemental_by_capability.items():
         evidence_groups.extend(
             _evidence_groups_from_sources(
@@ -3410,8 +3516,10 @@ async def search(
         verification_query=verification_query,
     )
 
-    synthesis_grounded = False
+    synthesis_grounded = pre_main_grounded
     if (
+        not pre_main_grounded
+        and
         validation_level in {"balanced", "strict"}
         and assessment.get("sufficient")
         and any(item.get("verified") for item in evidence)

@@ -157,6 +157,23 @@ async def test_xai_responses_inline_url_fallback_trims_ascii_and_cjk_terminal_pu
 
 
 @pytest.mark.asyncio
+async def test_xai_responses_inline_url_fallback_strips_markdown_duplication_and_cjk_suffix():
+    provider = XAIResponsesSearchProvider("https://api.x.ai/v1", "test-key", "test-model", ["web_search"])
+    response = output_text_response(
+        "Release https://react.dev/blog/2025/10/01/react-19-2](https://react.dev/blog/2025/10/01/react-19-2) "
+        "and RFC https://www.rfc-editor.org/rfc/rfc9110.html（可查看。"
+    )
+
+    result = await provider._parse_response(response)
+    _, sources = split_answer_and_sources(result)
+
+    assert sources == [
+        {"url": "https://react.dev/blog/2025/10/01/react-19-2"},
+        {"url": "https://www.rfc-editor.org/rfc/rfc9110.html"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_xai_responses_inline_url_fallback_rejects_malformed_and_non_http_urls():
     provider = XAIResponsesSearchProvider("https://api.x.ai/v1", "test-key", "test-model", ["web_search"])
     response = output_text_response(

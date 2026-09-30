@@ -1,19 +1,6 @@
 from typing import List
-import re
 from .providers.base import SearchResult
-
-_URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
-
-
-def extract_unique_urls(text: str) -> list[str]:
-    seen: set[str] = set()
-    urls: list[str] = []
-    for m in _URL_PATTERN.finditer(text):
-        url = m.group().rstrip('.,;:!?')
-        if url not in seen:
-            seen.add(url)
-            urls.append(url)
-    return urls
+from .url_utils import extract_unique_urls
 
 
 def format_extra_sources(tavily_results: list[dict] | None, firecrawl_results: list[dict] | None) -> str:

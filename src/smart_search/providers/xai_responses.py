@@ -11,6 +11,7 @@ from .base import BaseSearchProvider
 from .openai_compatible import _WaitWithRetryAfter, _is_retryable_exception, get_local_time_info
 from ..config import config
 from ..logger import log_info
+from ..url_utils import extract_unique_urls
 from ..utils import search_prompt
 
 
@@ -136,21 +137,7 @@ class XAIResponsesSearchProvider(BaseSearchProvider):
 
     @staticmethod
     def _extract_inline_urls(text: str) -> list[dict[str, str]]:
-        sources: list[dict[str, str]] = []
-        seen: set[str] = set()
-
-        for match in _INLINE_URL_PATTERN.finditer(text):
-            url = XAIResponsesSearchProvider._trim_inline_url_terminal_punctuation(match.group())
-            if not XAIResponsesSearchProvider._is_valid_inline_http_url(url):
-                continue
-            scheme, separator, remainder = url.partition(":")
-            url = f"{scheme.lower()}{separator}{remainder}"
-            if url in seen:
-                continue
-            seen.add(url)
-            sources.append({"url": url})
-
-        return sources
+        return [{"url": url} for url in extract_unique_urls(text)]
 
     @staticmethod
     def _trim_inline_url_terminal_punctuation(url: str) -> str:

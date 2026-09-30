@@ -4,11 +4,13 @@ from collections import defaultdict
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from .url_utils import normalize_extracted_url
+
 _TRACKING_KEYS = {"gclid", "fbclid", "mc_cid", "mc_eid"}
 
 
 def canonicalize_url(url: str) -> str:
-    value = (url or "").strip()
+    value = normalize_extracted_url(url)
     if not value or not value.startswith(("http://", "https://")):
         return value
     try:

@@ -115,3 +115,15 @@ class TestMergeSources:
         merged = merge_sources(sources)
         assert len(merged) == 1
         assert merged[0]["url"] == "https://valid.com"
+
+    def test_normalizes_markdown_and_cjk_url_artifacts(self):
+        sources = [
+            {"url": "https://react.dev/blog/2025/10/01/react-19-2](https://react.dev/blog/2025/10/01/react-19-2)"},
+            {"url": "https://react.dev/blog/2025/10/01/react-19-2**"},
+            {"url": "https://www.rfc-editor.org/rfc/rfc9110.html（可查看"},
+        ]
+        merged = merge_sources(sources)
+        assert [item["url"] for item in merged] == [
+            "https://react.dev/blog/2025/10/01/react-19-2",
+            "https://www.rfc-editor.org/rfc/rfc9110.html",
+        ]

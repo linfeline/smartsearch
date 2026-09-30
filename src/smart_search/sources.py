@@ -8,7 +8,7 @@ from typing import Any
 import asyncio
 
 from .config import config
-from .utils import extract_unique_urls
+from .url_utils import extract_unique_urls, normalize_extracted_url
 
 
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
@@ -126,13 +126,17 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
     for sources in source_lists:
         for item in sources or []:
             url = (item or {}).get("url")
-            if not isinstance(url, str) or not url.strip():
+            if not isinstance(url, str):
                 continue
-            url = url.strip()
+            url = normalize_extracted_url(url)
+            if not url:
+                continue
             if url in seen:
                 continue
             seen.add(url)
-            merged.append(item)
+            normalized_item = dict(item)
+            normalized_item["url"] = url
+            merged.append(normalized_item)
     return merged
 
 
@@ -365,7 +369,8 @@ def _normalize_sources(data: Any) -> list[dict]:
 
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             title, url = item[0], item[1]
-            if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
+            url = normalize_extracted_url(url) if isinstance(url, str) else ""
+            if url and url not in seen:
                 seen.add(url)
                 out: dict = {"url": url}
                 if isinstance(title, str) and title.strip():
@@ -375,7 +380,8 @@ def _normalize_sources(data: Any) -> list[dict]:
 
         if isinstance(item, dict):
             url = item.get("url") or item.get("href") or item.get("link")
-            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            url = normalize_extracted_url(url) if isinstance(url, str) else ""
+            if not url:
                 continue
             if url in seen:
                 continue

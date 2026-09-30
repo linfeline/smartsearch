@@ -20,6 +20,8 @@ class Config:
     _DEFAULT_INTENT_ROUTER_MODE = "hybrid"
     _DEFAULT_INTENT_ROUTER_TIMEOUT_SECONDS = "8"
     _DEFAULT_SEARCH_TIMEOUT_SECONDS = "180"
+    _DEFAULT_PROVIDER_COOLDOWN_SECONDS = "900"
+    _DEFAULT_PROVIDER_FAILURE_THRESHOLD = "2"
     _DEFAULT_INTENT_EMBEDDING_THRESHOLD = "0.74"
     _DEFAULT_INTENT_EMBEDDING_MARGIN = "0.05"
     _ALLOWED_XAI_TOOLS = {"web_search", "x_search"}
@@ -46,6 +48,8 @@ class Config:
         "SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS",
         "SMART_SEARCH_INTENT_ROUTER",
         "SMART_SEARCH_TIMEOUT_SECONDS",
+        "SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS",
+        "SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD",
         "INTENT_EMBEDDING_API_URL",
         "INTENT_EMBEDDING_API_KEY",
         "INTENT_EMBEDDING_MODEL",
@@ -465,8 +469,40 @@ class Config:
     def _validate_config_value(self, key: str, value: str) -> None:
         if key == "SMART_SEARCH_TIMEOUT_SECONDS":
             self._parse_positive_float_value(key, value)
+        elif key == "SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS":
+            self._parse_non_negative_float_value(key, value)
+        elif key == "SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD":
+            self._parse_positive_int_value(key, value)
         elif key == "OPENAI_COMPATIBLE_API_MODE":
             self._validate_enum_value(key, value, self._ALLOWED_OPENAI_COMPATIBLE_API_MODES)
+
+    def _non_negative_float_value(self, key: str, default: str) -> float:
+        value = self._get_config_value(key, default) or default
+        return self._parse_non_negative_float_value(key, value)
+
+    @staticmethod
+    def _parse_non_negative_float_value(key: str, raw_value: object) -> float:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {key}: {raw_value}. Expected a non-negative finite number.")
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"Invalid {key}: {raw_value}. Expected a non-negative finite number.")
+        return value
+
+    def _positive_int_value(self, key: str, default: str) -> int:
+        value = self._get_config_value(key, default) or default
+        return self._parse_positive_int_value(key, value)
+
+    @staticmethod
+    def _parse_positive_int_value(key: str, raw_value: object) -> int:
+        try:
+            value = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid {key}: {raw_value}. Expected a positive integer.")
+        if value < 1:
+            raise ValueError(f"Invalid {key}: {raw_value}. Expected a positive integer.")
+        return value
 
     def _positive_float_info(self, key: str, default: str) -> tuple[float, str]:
         try:
@@ -551,6 +587,20 @@ class Config:
     @property
     def search_timeout(self) -> float:
         return self._positive_float_value("SMART_SEARCH_TIMEOUT_SECONDS", self._DEFAULT_SEARCH_TIMEOUT_SECONDS)
+
+    @property
+    def provider_cooldown_seconds(self) -> float:
+        return self._non_negative_float_value(
+            "SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS",
+            self._DEFAULT_PROVIDER_COOLDOWN_SECONDS,
+        )
+
+    @property
+    def provider_failure_threshold(self) -> int:
+        return self._positive_int_value(
+            "SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD",
+            self._DEFAULT_PROVIDER_FAILURE_THRESHOLD,
+        )
 
     def _csv_values(self, key: str) -> list[str]:
         raw = self._get_config_value(key, "") or ""

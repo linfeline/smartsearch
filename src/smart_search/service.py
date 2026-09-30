@@ -50,6 +50,7 @@ from .providers.keenable import KeenableWebSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
 from .provider_errors import ProviderCallError, classify_provider_exception, provider_call_error, sanitize_provider_error_message
+from .provider_health import provider_fingerprint, provider_health
 from .sciverse_schema import (
     SciverseParameterError,
     build_sciverse_meta_search_payload,
@@ -607,6 +608,10 @@ def _attempt(
     }
     if extra:
         data.update(extra)
+    if capability != "main_search" and status in {"ok", "error"}:
+        health_extra = _record_provider_result(provider, status, error_type, error)
+        if health_extra:
+            data.update(health_extra)
     return data
 
 
@@ -625,6 +630,78 @@ def _tavily_is_enabled() -> bool:
 
 def _tavily_disabled_message() -> str:
     return "Tavily is disabled by TAVILY_ENABLED=false. No Tavily network request was made."
+
+
+PROVIDER_CREDENTIAL_SOURCES: dict[str, Any] = {
+    "doubao": lambda: (config.doubao_search_api_key, config.doubao_search_api_url),
+    "zhipu": lambda: (config.zhipu_api_key, config.zhipu_api_url),
+    "zhipu-mcp": lambda: (config.zhipu_mcp_api_key, config.zhipu_mcp_search_api_url),
+    "zhipu-mcp-reader": lambda: (config.zhipu_mcp_api_key, config.zhipu_mcp_reader_api_url),
+    "keenable": lambda: (config.keenable_api_key, config.keenable_api_url),
+    "tavily": lambda: (config.tavily_api_key, config.tavily_api_url),
+    "firecrawl": lambda: (config.firecrawl_api_key, config.firecrawl_api_url),
+    "exa": lambda: (config.exa_api_key, config.exa_base_url),
+    "context7": lambda: (config.context7_api_key, config.context7_base_url),
+    "jina": lambda: (config.jina_api_key, config.jina_reader_api_url),
+    "anysearch": lambda: (config.anysearch_api_key, config.anysearch_api_url),
+    "sciverse": lambda: (config.sciverse_api_token, config.sciverse_api_url),
+}
+
+
+def _provider_fingerprint(provider: str) -> str:
+    source = PROVIDER_CREDENTIAL_SOURCES.get(provider)
+    return provider_fingerprint(*source()) if source else ""
+
+
+def _provider_health_status(provider: str) -> dict[str, Any]:
+    return provider_health.status(provider, _provider_fingerprint(provider))
+
+
+def _cooldown_attempt_extra(state: dict[str, Any]) -> dict[str, Any]:
+    return {"provider_health": {
+        "state": state.get("state", "closed"),
+        "consecutive_failures": state.get("consecutive_failures", 0),
+        "cooldown_remaining_seconds": state.get("cooldown_remaining_seconds", 0.0),
+        "hard_failure": bool(state.get("hard_failure")),
+        "probe": bool(state.get("probe")),
+    }}
+
+
+def _plan_provider_health(capability: str, providers: list[str]) -> tuple[list[str], list[dict]]:
+    if not providers or not provider_health.enabled:
+        return providers, []
+    states = {p: _provider_health_status(p) for p in providers}
+    runnable = [p for p in providers if states[p]["state"] != "cooldown"]
+    if not runnable:
+        probe = next((p for p in providers if not states[p]["hard_failure"]), "")
+        if probe:
+            states[probe] = {**states[probe], "probe": True}
+            runnable = [probe]
+    skipped = []
+    for p in providers:
+        if p in runnable:
+            continue
+        state = states[p]
+        skipped.append(_attempt(
+            capability, p, "skipped", time.time(),
+            error_type=state.get("error_type", ""),
+            error=state.get("error", "") or "provider is on failure cooldown",
+            extra=_cooldown_attempt_extra(state),
+        ))
+    return runnable, skipped
+
+
+def _record_provider_result(provider: str, status: str, error_type: str = "", error: str = "") -> dict[str, Any]:
+    if provider not in PROVIDER_CREDENTIAL_SOURCES:
+        return {}
+    fingerprint = _provider_fingerprint(provider)
+    if status == "ok":
+        provider_health.record_success(provider, fingerprint)
+        return {}
+    if status != "error" and not error_type:
+        return {}
+    state = provider_health.record_failure(provider, fingerprint, error_type, error)
+    return _cooldown_attempt_extra(state) if state.get("state") == "cooldown" else {}
 
 
 def _openai_model_breaker_key(api_url: str, model: str, api_mode: str = "chat-completions") -> tuple[str, str, str]:
@@ -2165,6 +2242,8 @@ async def _run_web_fetch_fallback(
         providers = ordered
     if fallback == "off":
         providers = providers[:1]
+    providers, skipped_health = _plan_provider_health("web_fetch", providers)
+    attempts.extend(skipped_health)
 
     for provider in providers:
         start = time.time()
@@ -2214,6 +2293,8 @@ async def _run_web_search_fallback(
         configured = [provider for provider in provider_filter if provider in configured]
     if fallback == "off":
         configured = configured[:1]
+    configured, skipped_health = _plan_provider_health("web_search", configured)
+    attempts.extend(skipped_health)
 
     for provider in configured:
         start = time.time()
@@ -2289,6 +2370,8 @@ async def _run_docs_search_fallback(
         configured = [p for p in provider_filter if p in configured]
     if fallback == "off":
         configured = configured[:1]
+    configured, skipped_health = _plan_provider_health("docs_search", configured)
+    attempts.extend(skipped_health)
 
     for provider in configured:
         start = time.time()
@@ -2338,6 +2421,8 @@ async def _run_vertical_search_fallback(
         configured = [p for p in provider_filter if p in configured]
     if fallback == "off":
         configured = configured[:1]
+    configured, skipped_health = _plan_provider_health("vertical_search", configured)
+    attempts.extend(skipped_health)
 
     for provider in configured:
         start = time.time()
@@ -2946,9 +3031,9 @@ async def search(
     effective_model = successful_main_config["model"]
 
     extra_calls: list[tuple[str, Any]] = []
-    if tavily_count:
+    if tavily_count and _provider_health_status("tavily").get("state") != "cooldown":
         extra_calls.append(("tavily", lambda: call_tavily_search(query, tavily_count)))
-    if firecrawl_count:
+    if firecrawl_count and _provider_health_status("firecrawl").get("state") != "cooldown":
         extra_calls.append(("firecrawl", lambda: call_firecrawl_search(query, firecrawl_count)))
 
     gathered = await _collect_extra_source_calls(extra_calls, budget, execution)

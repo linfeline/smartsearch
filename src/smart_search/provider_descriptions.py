@@ -41,6 +41,22 @@ PROVIDER_DESCRIPTIONS: dict[str, dict[str, dict[str, str]]] = {
             "guidance_zh": "擅长发现中文网页来源；不适合必须强制限定时间或域名的请求，因为此操作未设置这些筛选。",
         },
     },
+    "doubao": {
+        "search": {
+            "en": "Discovers Chinese and current web sources through Doubao Search.",
+            "zh": "通过豆包搜索发现中文及实时网页来源。",
+            "guidance_en": "Good for Chinese and domestic current-source discovery; snippets alone do not verify claims.",
+            "guidance_zh": "适合中文和国内时事来源发现；仅有摘要不能证明具体结论。",
+        },
+    },
+    "keenable": {
+        "search": {
+            "en": "Finds global web sources through Keenable Search.",
+            "zh": "通过 Keenable 检索全球网页来源。",
+            "guidance_en": "Good for fast broad web discovery; fetch important pages before treating results as proof.",
+            "guidance_zh": "适合快速发现全球网页；重要结论需要读取正文核验。",
+        },
+    },
     "zhipu-mcp": {
         "search": {
             "en": "Discovers linked web results through the GLM Coding Plan MCP web_search_prime tool.",

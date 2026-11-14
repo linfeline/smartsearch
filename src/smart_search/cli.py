@@ -2276,9 +2276,11 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         default_selected.append("zhipu")
     if str(current.get("KEENABLE_ENABLED", "")).strip().lower() in {"true", "1", "yes"}:
         default_selected.append("keenable")
+    if current.get("YUANBAO_SECRET_ID") and current.get("YUANBAO_SECRET_KEY"):
+        default_selected.append("yuanbao")
     selected = _prompt_provider_multi_select(
         _t(lang, "选择可选 web_search 增强", "Choose optional web_search reinforcement"),
-        ["doubao", "zhipu", "keenable"],
+        ["doubao", "zhipu", "keenable", "yuanbao"],
         default_selected,
         lang,
     )
@@ -2319,6 +2321,15 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
             current.get("KEENABLE_TITLE", "smart-search"),
             optional=True,
             lang=lang,
+        )
+    if "yuanbao" in selected:
+        values["YUANBAO_SECRET_ID"] = _prompt_value(
+            "YUANBAO_SECRET_ID", "Yuanbao Search SecretId",
+            current.get("YUANBAO_SECRET_ID", ""), lang=lang,
+        )
+        values["YUANBAO_SECRET_KEY"] = _prompt_value(
+            "YUANBAO_SECRET_KEY", "Yuanbao Search SecretKey",
+            current.get("YUANBAO_SECRET_KEY", ""), lang=lang,
         )
     if _prompt_yes_no(_t(lang, "是否调整验证/兜底默认值?", "Adjust validation/fallback defaults?"), default=False):
         values["SMART_SEARCH_VALIDATION_LEVEL"] = _prompt_value(

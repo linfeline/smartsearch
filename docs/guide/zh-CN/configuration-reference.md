@@ -34,6 +34,13 @@
 | `CONTEXT7_API_KEY` | 查开源库文档用。文档检索能力的另一个选项。 | `secret` | 未设置 |
 | `CONTEXT7_BASE_URL` | Context7 服务基础地址；程序会补全库搜索和文档接口路径。 | `url` | `https://context7.com` |
 | `CONTEXT7_TIMEOUT_SECONDS` | 等待此服务单次响应的最长秒数；超时会返回错误或按当前策略兜底，通常保留默认值。 | `float` | `30` |
+| `DOUBAO_SEARCH_API_KEY` | 用于搜索中文和国内新闻。 | `secret` | 未设置 |
+| `DOUBAO_SEARCH_API_URL` | 豆包搜索 API 地址。 | `url` | `https://open.feedcoopapi.com` |
+| `DOUBAO_SEARCH_TIMEOUT_SECONDS` | 等待豆包返回搜索结果的最长秒数。 | `float` | `30` |
+| `KEENABLE_API_KEY` | 用于全球网页搜索。 | `secret` | 未设置 |
+| `KEENABLE_API_URL` | Keenable Search API 地址。 | `url` | `https://api.keenable.ai/v1/search` |
+| `KEENABLE_TIMEOUT_SECONDS` | 等待 Keenable 返回搜索结果的最长秒数。 | `float` | `30` |
+| `KEENABLE_TITLE` | Keenable 搜索请求使用的标题。 | `text` | 未设置 |
 | `ZHIPU_API_KEY` | 国内时效内容搜得比较好。属于可选增强，不配也能跑。 | `secret` | 未设置 |
 | `ZHIPU_API_URL` | 智谱联网搜索基础地址；保留 /api，程序会补全搜索接口路径。 | `url` | `https://open.bigmodel.cn/api` |
 | `ZHIPU_SEARCH_ENGINE` | search_std / search_pro / search_pro_sogou / search_pro_quark，或自定义。 | `text` | `search_std` |
@@ -73,6 +80,8 @@
 | `CONTEXT7_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
 | `EXA_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
 | `ZHIPU_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
+| `DOUBAO_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
+| `KEENABLE_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
 | `ZHIPU_MCP_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
 | `ZHIPU_MCP_READER_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |
 | `FIRECRAWL_ENABLED` | 禁用后保留配置，不再发起请求。保存更改后生效。 | `bool` | `true` |

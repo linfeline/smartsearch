@@ -22,6 +22,7 @@ from .intent_router import (
     FETCH_INTENT_KEYWORDS as ROUTER_FETCH_INTENT_KEYWORDS,
     VERTICAL_INTENT_KEYWORDS as ROUTER_VERTICAL_INTENT_KEYWORDS,
     build_rules_route,
+    IntentRouteResult,
     extract_urls as router_extract_urls,
     normalize_router_mode,
 )
@@ -42,6 +43,7 @@ from .providers.openai_compatible import (
 from .providers.sciverse import SciverseProvider
 from .providers.tinyfish import TinyFishFetchProvider, TinyFishSearchProvider
 from .providers.xai_responses import XAIResponsesSearchProvider
+from .providers.yuanbao import YuanbaoSearchProvider
 from .providers.doubao import DoubaoWebSearchProvider
 from .providers.keenable import KeenableWebSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
@@ -180,7 +182,7 @@ RESEARCH_JS_HEAVY_KEYWORDS = {
 RESEARCH_PDF_KEYWORDS = {"pdf", "arxiv", "论文", "paper", ".pdf"}
 RESEARCH_PROFILE_ORDER = {
     "main_search": ["xai-responses", "openai-compatible"],
-    "web_search": ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"],
+    "web_search": ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"],
     "docs_search": ["context7", "exa"],
     "web_fetch": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl", "tinyfish", "deepseek"],
     "vertical_search": ["anysearch"],
@@ -328,8 +330,8 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
-WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
-WEB_SEARCH_BROAD_CHAIN = ["keenable", "tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
+WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"]
+WEB_SEARCH_BROAD_CHAIN = ["keenable", "tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp", "tinyfish", "deepseek", "yuanbao"]
 MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
@@ -558,6 +560,8 @@ PROVIDER_CREDENTIAL_SOURCES: dict[str, Any] = {
     "xai-responses": lambda: (config.xai_api_key, config.xai_api_url),
     "openai-compatible": lambda: (config.openai_compatible_api_key, config.openai_compatible_api_url),
     "zhipu": lambda: (config.zhipu_api_key, config.zhipu_api_url),
+    "doubao": lambda: (config.doubao_search_api_key, config.doubao_search_api_url),
+    "keenable": lambda: (config.keenable_api_key, config.keenable_api_url),
     "zhipu-mcp": lambda: (config.zhipu_mcp_api_key, config.zhipu_mcp_search_api_url),
     "zhipu-mcp-reader": lambda: (config.zhipu_mcp_api_key, config.zhipu_mcp_reader_api_url),
     "tavily": lambda: (config.tavily_api_key, config.tavily_api_url),

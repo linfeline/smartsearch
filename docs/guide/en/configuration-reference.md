@@ -34,6 +34,13 @@ Generated from current configuration metadata. Active keys appear below. Retired
 | `CONTEXT7_API_KEY` | Looks up open-source library docs. The other docs-search option. | `secret` | Not set |
 | `CONTEXT7_BASE_URL` | Context7 base URL. Library-search and documentation paths are added automatically. | `url` | `https://context7.com` |
 | `CONTEXT7_TIMEOUT_SECONDS` | Maximum seconds to wait for one response from this service. A timeout returns an error or uses the configured fallback; normally leave the default. | `float` | `30` |
+| `DOUBAO_SEARCH_API_KEY` | For Chinese and domestic web search. | `secret` | Not set |
+| `DOUBAO_SEARCH_API_URL` | Doubao Search API endpoint. | `url` | `https://open.feedcoopapi.com` |
+| `DOUBAO_SEARCH_TIMEOUT_SECONDS` | Maximum time to wait for Doubao results. | `float` | `30` |
+| `KEENABLE_API_KEY` | For global web discovery. | `secret` | Not set |
+| `KEENABLE_API_URL` | Keenable Search API endpoint. | `url` | `https://api.keenable.ai/v1/search` |
+| `KEENABLE_TIMEOUT_SECONDS` | Maximum time to wait for Keenable results. | `float` | `30` |
+| `KEENABLE_TITLE` | Title sent in Keenable Search requests. | `text` | Not set |
 | `ZHIPU_API_KEY` | Good at recent Chinese-language content. Optional; things run without it. | `secret` | Not set |
 | `ZHIPU_API_URL` | Base URL for Zhipu web search. Keep /api; the search endpoint is added automatically. | `url` | `https://open.bigmodel.cn/api` |
 | `ZHIPU_SEARCH_ENGINE` | search_std, search_pro, search_pro_sogou, search_pro_quark, or a custom one. | `text` | `search_std` |
@@ -73,6 +80,8 @@ Generated from current configuration metadata. Active keys appear below. Retired
 | `CONTEXT7_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
 | `EXA_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
 | `ZHIPU_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
+| `DOUBAO_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
+| `KEENABLE_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
 | `ZHIPU_MCP_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
 | `ZHIPU_MCP_READER_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |
 | `FIRECRAWL_ENABLED` | Disabling keeps the configuration and stops requests. Takes effect after saving changes. | `bool` | `true` |

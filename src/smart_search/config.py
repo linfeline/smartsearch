@@ -55,6 +55,8 @@ class Config:
         "context7": "CONTEXT7_ENABLED",
         "exa": "EXA_ENABLED",
         "zhipu": "ZHIPU_ENABLED",
+        "doubao": "DOUBAO_ENABLED",
+        "keenable": "KEENABLE_ENABLED",
         "zhipu-mcp": "ZHIPU_MCP_ENABLED",
         "zhipu-mcp-reader": "ZHIPU_MCP_READER_ENABLED",
         "tavily": "TAVILY_ENABLED",

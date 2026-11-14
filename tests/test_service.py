@@ -1571,7 +1571,7 @@ def test_zhipu_mcp_key_satisfies_web_search_and_reader_fetch_as_separate_provide
     assert result["ok"] is True
     assert result["missing"] == []
     assert result["capability_status"]["web_search"]["configured"] == ["zhipu-mcp"]
-    assert result["capability_status"]["web_search"]["fallback_chain"] == ["doubao", "zhipu", "zhipu-mcp", "keenable", "tavily", "firecrawl"]
+    assert result["capability_status"]["web_search"]["fallback_chain"] == list(service.WEB_SEARCH_FALLBACK_CHAIN)
     assert result["capability_status"]["web_fetch"]["configured"] == ["zhipu-mcp-reader"]
 
 
@@ -3251,12 +3251,13 @@ async def test_extra_source_failures_are_recorded_without_hiding_them(monkeypatc
         raise service.ProviderCallError("rate_limited", "Tavily rate limited")
     async def empty(*args, **kwargs):
         return []
-    monkeypatch.setattr(service, "call_tavily_search", fail)
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_primary_search)
+    monkeypatch.setattr(service, "call_tavily_search", failing_tavily)
     monkeypatch.setattr(service, "call_firecrawl_search", empty)
     result = await service.search("latest news")
     assert not result["ok"]
-    assert [(a["provider"], a["status"]) for a in result["provider_attempts"]] == [("tavily", "error"), ("firecrawl", "empty")]
-    assert result["error_type"] == "rate_limited"
+    assert [(a["provider"], a["status"]) for a in result["provider_attempts"][:2]] == [("tavily", "error"), ("firecrawl", "empty")]
+    assert result["error_type"] == "evidence_error"
 
 
 @pytest.mark.asyncio

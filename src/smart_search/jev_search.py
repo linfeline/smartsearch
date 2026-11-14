@@ -175,6 +175,10 @@ class ChannelExecutor:
             results = _check_data(await svc.exa_search(query, num_results=self.count, include_highlights=True)).get("results", [])
         elif provider == "zhipu":
             results = _check_data(await svc.zhipu_search(query, count=self.count)).get("results", [])
+        elif provider == "doubao":
+            results = _check_data(await svc.doubao_search(query, count=self.count)).get("results", [])
+        elif provider == "keenable":
+            results = _check_data(await svc.keenable_search(query, count=self.count)).get("results", [])
         elif provider == "zhipu-mcp":
             results = _check_data(await svc.zhipu_mcp_search(query, count=self.count)).get("results", [])
         elif provider == "tavily":

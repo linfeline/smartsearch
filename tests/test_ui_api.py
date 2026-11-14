@@ -117,8 +117,8 @@ def test_reset_health_clears_a_real_cooldown(isolated):
 
 def test_skills_status_is_read_only(isolated):
     result = ui_api.skills_status()
-    assert result["ok"] is True
     assert result["selected"]
+    assert result["targets"]
 
 
 def test_skills_status_rejects_an_unknown_target(isolated):

@@ -42,3 +42,15 @@ def test_chinese_web_fallback_keeps_doubao_first(monkeypatch):
     selected = fallback_channels(service, "今天中国政策新闻", candidates, limit=3)
     assert selected
     assert selected[0]["provider"] == "doubao"
+
+
+def test_global_web_fallback_keeps_keenable_first(monkeypatch):
+    monkeypatch.setenv("DOUBAO_SEARCH_API_KEY", "doubao-test")
+    monkeypatch.setenv("KEENABLE_API_KEY", "keenable-test")
+    monkeypatch.setenv("KEENABLE_ENABLED", "true")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test")
+    query = "PostgreSQL 18 release notes"
+    candidates = available_channels(service, query, [], providers="keenable,tavily,doubao")
+    selected = fallback_channels(service, query, candidates, limit=3)
+    assert selected
+    assert selected[0]["provider"] == "keenable"

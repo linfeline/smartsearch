@@ -38,7 +38,8 @@ Use the local `smart-search` command as the default execution layer for web rese
 - `research`: shared bounded loop with Jev or local routing for complementary discovery, fetch/read, evidence gaps, and optional synthesis.
 - `deep`: offline Deep Research planner; it does not run providers, fetch pages, or replace default `search`.
 - `zhipu-search`: Chinese-language, domestic China, policy/regulatory, announcements, current news, or China-local source discovery.
-- `context7-library` / `context7-docs`: library, SDK, API, framework, or documentation intent. Ordinary search uses the first library in Context7's ranked candidates; research may ask Jev to choose a candidate, using the first candidate if Jev fails or no score reaches its threshold. Unresolved libraries allow same-capability fallback. Explicit commands retain the candidate list and supplied library id.
+- `doubao-search`: ByteDance Doubao Search (Volcengine Search Infinity) for the same Chinese/domestic/current source discovery; uses `DOUBAO_SEARCH_API_KEY`, not an Ark key.
+- `context7-library` / `context7-docs`: library, SDK, API, framework, or documentation intent. Automatic routes select Context7 only when a query subject overlaps a candidate title/id; otherwise use same-capability Exa fallback. Explicit commands retain the candidate list and supplied library id.
 - `exa-search`: official domains, papers, product pages, trusted pages, date/domain-filtered low-noise discovery, and adjacent source discovery through `exa-similar`.
 - `fetch`: user-provided URLs or any claim that depends on page content.
 - `map`: documentation site or domain structure before fetching many pages from one site.

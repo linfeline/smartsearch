@@ -93,6 +93,7 @@ def test_each_subcommand_help_exits_successfully(capsys):
         ["exa-search", "--help"],
         ["exa-similar", "--help"],
         ["zhipu-search", "--help"],
+        ["doubao-search", "--help"],
         ["zhipu-mcp-search", "--help"],
         ["zhipu-mcp-reader", "--help"],
         ["zhipu-mcp-search-doc", "--help"],
@@ -157,6 +158,8 @@ def test_command_aliases_parse_to_canonical_commands():
         (["xs", "https://example.com"], "exa-similar"),
         (["z", "query"], "zhipu-search"),
         (["zp", "query"], "zhipu-search"),
+        (["dd", "query"], "doubao-search"),
+        (["volc-search", "query"], "doubao-search"),
         (["zmcp-search", "query"], "zhipu-mcp-search"),
         (["zmcp-reader", "https://example.com"], "zhipu-mcp-reader"),
         (["zmcp-doc", "owner/repo", "install"], "zhipu-mcp-search-doc"),
@@ -1415,6 +1418,9 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
     async def fake_zhipu_search(*args, **kwargs):
         return {"ok": True, "query": "news", "provider": "zhipu", "results": [{"title": "News", "url": "https://news.example.com", "description": "desc"}]}
 
+    async def fake_doubao_search(*args, **kwargs):
+        return {"ok": True, "query": "news", "provider": "doubao", "results": [{"title": "Doubao News", "url": "https://doubao.example.com", "description": "desc"}]}
+
     async def fake_zhipu_mcp_search(*args, **kwargs):
         return {"ok": True, "query": "news", "provider": "zhipu-mcp", "tool": "web_search_prime", "results": [{"title": "MCP News", "url": "https://mcp.example.com"}]}
 
@@ -1430,6 +1436,7 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
     monkeypatch.setattr(cli.service, "exa_search", fake_exa_search)
     monkeypatch.setattr(cli.service, "exa_find_similar", fake_exa_similar)
     monkeypatch.setattr(cli.service, "zhipu_search", fake_zhipu_search)
+    monkeypatch.setattr(cli.service, "doubao_search", fake_doubao_search)
     monkeypatch.setattr(cli.service, "zhipu_mcp_search", fake_zhipu_mcp_search)
     monkeypatch.setattr(cli.service, "zhipu_mcp_reader", fake_zhipu_mcp_reader)
     monkeypatch.setattr(cli.service, "context7_library", fake_context7_library)
@@ -1439,6 +1446,7 @@ def test_provider_markdown_outputs_result_lists(monkeypatch, capsys):
         (["exa-search", "query", "--format", "markdown"], "Example", "https://example.com"),
         (["exa-similar", "https://source.example.com", "--format", "markdown"], "Similar", "https://similar.example.com"),
         (["zhipu-search", "news", "--format", "markdown"], "News", "https://news.example.com"),
+        (["doubao-search", "news", "--format", "markdown"], "Doubao News", "https://doubao.example.com"),
         (["zhipu-mcp-search", "news", "--format", "markdown"], "MCP News", "https://mcp.example.com"),
         (["zhipu-mcp-reader", "https://source.example.com", "--format", "markdown"], "MCP Page", "Zhipu Coding Plan MCP Reader"),
         (["context7-library", "react", "--format", "markdown"], "React", "/reactjs/react.dev"),
@@ -1572,6 +1580,7 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
         ("exa-search", ["exa-search", "query", "--format", "markdown"]),
         ("exa-similar", ["exa-similar", "https://example.com", "--format", "markdown"]),
         ("zhipu-search", ["zhipu-search", "query", "--format", "markdown"]),
+        ("doubao-search", ["doubao-search", "query", "--format", "markdown"]),
         ("zhipu-mcp-search", ["zhipu-mcp-search", "query", "--format", "markdown"]),
         ("zhipu-mcp-reader", ["zhipu-mcp-reader", "https://example.com", "--format", "markdown"]),
         ("zhipu-mcp-search-doc", ["zhipu-mcp-search-doc", "owner/repo", "install", "--format", "markdown"]),
@@ -1603,6 +1612,7 @@ def test_all_formatted_commands_have_non_json_markdown(monkeypatch):
             "exa-search": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
             "exa-similar": {"ok": True, "results": [{"title": "Example", "url": "https://example.com"}]},
             "zhipu-search": {"ok": True, "results": [{"title": "News", "url": "https://news.example.com"}]},
+            "doubao-search": {"ok": True, "results": [{"title": "Doubao News", "url": "https://doubao.example.com"}]},
             "zhipu-mcp-search": {"ok": True, "provider": "zhipu-mcp", "tool": "web_search_prime", "results": [{"title": "MCP", "url": "https://mcp.example.com"}]},
             "zhipu-mcp-reader": {"ok": True, "provider": "zhipu-mcp-reader", "tool": "webReader", "content": "MCP Page"},
             "zhipu-mcp-search-doc": {"ok": True, "provider": "zhipu-mcp-zread", "tool": "search_doc", "results": [{"title": "Doc", "url": "https://docs.example.com"}]},
@@ -1774,6 +1784,10 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "zhipu.example.com/api",
         "--zhipu-search-engine",
         "search_pro",
+        "--doubao-key",
+        "doubao-secret",
+        "--doubao-api-url",
+        "https://open.feedcoopapi.com",
         "--zhipu-mcp-key",
         "zmcp-secret",
         "--zhipu-mcp-search-api-url",
@@ -1845,6 +1859,8 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["ZHIPU_API_KEY"] == "zhipu-secret"
     assert saved["ZHIPU_API_URL"] == "https://zhipu.example.com/api"
     assert saved["ZHIPU_SEARCH_ENGINE"] == "search_pro"
+    assert saved["DOUBAO_SEARCH_API_KEY"] == "doubao-secret"
+    assert saved["DOUBAO_SEARCH_API_URL"] == "https://open.feedcoopapi.com"
     assert saved["ZHIPU_MCP_API_KEY"] == "zmcp-secret"
     assert saved["ZHIPU_MCP_SEARCH_API_URL"] == "https://zmcp.example.com/search"
     assert saved["ZHIPU_MCP_READER_API_URL"] == "https://zmcp.example.com/reader"

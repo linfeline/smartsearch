@@ -33,43 +33,22 @@ For research, `SMART_SEARCH_JEV_SYNTHESIZE` accepts `true`, `false`, and `auto`.
 - Jina Reader is `web_fetch` only, not a general search provider. `JINA_API_KEY` is required before Jina satisfies the standard minimum profile; anonymous `r.jina.ai` is explicit/experimental fetch behavior.
 - Same-capability fallback is allowed; model answers and web search are mutual fallbacks in ordinary search. Context7 is not used for unrelated broad web queries, and page extraction providers are not used as docs search providers.
 - `TAVILY_ENABLED=false` removes Tavily from registered `web_search` and `web_fetch` routes even when its key is present. Direct Tavily search/extract calls, `map`, `doctor`, and smoke must make no Tavily network request; `map` reports a local configuration error. Firecrawl remains independently configured and all fallback stays within its capability.
-- In Jev mode, Jev chooses among allowed capabilities and providers for the question; there is no mandatory main-model call or fixed global provider order. Local routing prioritizes suitable capabilities and configured preferences; a docs question with no docs channel configured uses web search instead of no channel.
-- `main_search` contains xAI Responses and OpenAI-compatible model channels; `web_search` contains Zhipu REST/MCP, Tavily, Firecrawl, TinyFish, DeepSeek and Yuanbao Search; `docs_search` contains Context7 and Exa. Failure fallback stays within the selected capability family; model answers and web search are mutual fallbacks in ordinary search.
-- Ordinary Context7 uses the first library in Context7's ranked candidates, without a second Jev call. Research may use Jev to select the matching library, using the first candidate if Jev fails or no score reaches its threshold. Empty results may fall through to same-capability Exa; explicit Context7 commands remain unchanged.
-- `--extra-sources N` controls the selected channel's result count. It does not add channels, split a budget between providers, or make Tavily/Firecrawl a required extra stage. A known-URL search follows the configured Jev/local routing; local routing prefers page reading.
-- `fetch` tries Tavily first, then Jina with `JINA_API_KEY`, then Zhipu Coding Plan MCP Reader, then Firecrawl, then TinyFish, then DeepSeek.
-
-TinyFish:
-
-- `TINYFISH_API_KEY` is optional and registers TinyFish for both `web_search` and `web_fetch`. It never satisfies `main_search` or `docs_search`. Jev may select it directly; the direct `fetch` fallback order remains as listed above.
-- `TINYFISH_SEARCH_API_URL` defaults to `https://api.search.tinyfish.ai` and is called as `GET ?query=...`; `TINYFISH_FETCH_API_URL` defaults to `https://api.fetch.tinyfish.ai` and is called as `POST` with `{"urls": [url], "format": "markdown"}`.
-- Both endpoints send `X-API-Key`, not `Authorization: Bearer`. Never log or echo the key.
-- Search results normalize `snippet` to `description`, `site_name` to `source`, and `date` to `published_date`. An empty result set is a successful empty response, not a failure.
-- Fetch reads `results[0].text`; `errors[]` entries are surfaced as `provider_error` with the upstream message. A payload with neither results nor errors is `provider_error`, and a non-object payload is `parse_error`.
-- Challenge pages such as `Checking if the site connection is secure` are reported as `quality_error` so same-capability fallback can continue.
-- `401`/403 map to `auth_error`, `408` to `timeout`, `429` to `rate_limited`, `5xx` to `network_error`, and `400`/422 to `parameter_error`.
-DeepSeek:
-
-- `DEEPSEEK_API_KEY` is optional and registers DeepSeek for both `web_search` and `web_fetch`; it is the same key as the DeepSeek model API. It never satisfies `main_search` or `docs_search`. Jev may select it directly; the direct `fetch` fallback order remains as listed above.
-- `DEEPSEEK_API_URL` defaults to `https://api.deepseek.com`; search calls `POST /v1/tools/search` with `{"query", "count"}` and fetch calls `POST /v1/tools/fetch` with `{"url"}`, both with `Authorization: Bearer`. A trailing `/v1` in the base URL is accepted. Never log or echo the key.
-- DeepSeek accepts queries of at most 128 characters, so longer queries are shortened at a word boundary. `site:`, `-site:`, `lang:`, `after:`/`before:` and quoted phrases in the query pass through unchanged.
-- Search results normalize `summary` (falling back to `snippet`) to `description`, `site_name` to `source`, and `date` to `published_date`. Summaries are not page text: fetch a key page before citing it. An empty result set is a successful empty response.
-- Fetch returns the page Markdown. HTTP 403 (URL refused by DeepSeek's safety policy) and 404 (no usable page content, which currently includes PDF links and private network addresses) mean that page has nothing to read: the attempt is `empty`, fallback continues, and the provider is not cooled down. `401` maps to `auth_error`, `402` (insufficient balance) to `provider_error`, `429` to `rate_limited`, `5xx` to `network_error`.
-- DeepSeek bills each successful search or fetch request. `doctor` and `providers test deepseek` send one real request to each.
-
-Yuanbao Search:
-
-- `YUANBAO_SECRET_ID` and `YUANBAO_SECRET_KEY`, a Tencent Cloud API key with Yuanbao Search enabled, register Yuanbao Search for `web_search` only. It never satisfies `main_search`, `docs_search` or `web_fetch`. Jev may select it directly; `search --providers yuanbao` forces it.
-- `YUANBAO_API_URL` defaults to `https://wsa.tencentcloudapi.com`. Each search is one Tencent Cloud API 3.0 `SearchPro` call (version `2025-05-08`) with `{"Query"}`, signed with TC3-HMAC-SHA256 the way the official SDK signs it. Never log or echo either secret.
-- Results normalize `passage` to `description`, the longer `content` summary (standard and flagship tiers only) to `content`, `site` to `source`, and `date` to `published_date`. At most 10 results come back.
-- Errors arrive as HTTP 200 with `Response.Error`. `AuthFailure*` and `UnauthorizedOperation*` map to `auth_error`, `RequestLimitExceeded*` and `LimitExceeded*` to `rate_limited`, `InvalidParameter*`, `MissingParameter*` and `UnknownParameter*` to `parameter_error`, and any other code to `provider_error`; the code stays in the message.
-- Every search counts against the Tencent Cloud quota. `doctor` and `providers test yuanbao` send one real search.
+- `main_search`: xAI Responses first for Grok/xAI, then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
+- `web_search`: Doubao Search first when routed in, then Zhipu Web Search API, then Zhipu Coding Plan MCP `web_search_prime`, then Tavily / Firecrawl source search when configured.
+- `docs_search`: Context7 first for library/API/docs intent, then Exa for official-domain, paper, product-page, trusted-site, or low-noise supplemental discovery.
+- Automatic Context7 selection has no preferred library-id map. A candidate needs normalized query-subject overlap in its title or id; title/id exact and multi-token matches dominate, while description/trust/benchmark only break ties. When no candidate is eligible, Context7 is recorded as empty and can fall through to same-capability Exa. Explicit `context7-library` output and explicit `context7-docs LIBRARY_ID` remain unchanged.
+- Fetch capability: Tavily first, then Jina Reader with `JINA_API_KEY`, then Zhipu Coding Plan MCP `webReader`, then Firecrawl.
+- `search` calls Tavily and/or Firecrawl only when `--extra-sources N` is greater than 0.
+- With both Tavily and Firecrawl configured, `search --extra-sources N` splits extra sources between them, with Tavily receiving about 60% and Firecrawl the rest.
+- `fetch` and known-URL `search "https://..."` use the same fetch fallback chain.
+- `fetch` tries Tavily first, then Jina with `JINA_API_KEY`, then Zhipu Coding Plan MCP Reader, then Firecrawl.
 - `map` currently uses Tavily only.
 - `exa-search` and `exa-similar` use Exa only.
 - `context7-library` and `context7-docs` use Context7 only.
 - `anysearch-domains`, `anysearch-search`, `anysearch-extract`, and `anysearch-batch` use AnySearch only. Treat results as acceptance evidence until the target vertical domain is reviewed.
 - `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, and `sciverse-relations` use Sciverse only. They are explicit academic commands and must not be inserted into default provider fallback.
 - `zhipu-search` uses Zhipu only.
+- `doubao-search` uses Doubao Search / Volcengine Search Infinity only.
 - `zhipu-mcp-search`, `zhipu-mcp-reader`, and `zhipu-mcp-*` zread commands use Zhipu Coding Plan Remote MCP only.
 - Runtime config priority is environment variables first, then local config file, then defaults.
 - `setup` and `config` read/write the local Smart Search config file and do not call providers.
@@ -85,6 +64,12 @@ Zhipu Web Search API:
 - `zhipu-search` corresponds to the official Zhipu Web Search API route, using `ZHIPU_API_URL` plus `ZHIPU_SEARCH_ENGINE`; it is not Zhipu Chat Completions `tools=[web_search]`, not Search Agent, and not the MCP Server.
 - `ZHIPU_SEARCH_ENGINE` defaults to `search_std`. Official Web Search API service values include `search_std`, `search_pro`, `search_pro_sogou`, and `search_pro_quark`; keep custom values possible because official services may change.
 - `TAVILY_API_URL` only affects Tavily REST calls and does not proxy Zhipu.
+
+Doubao Search:
+
+- `doubao-search` corresponds to the official Doubao Search Custom REST route at `DOUBAO_SEARCH_API_URL` plus `DOUBAO_SEARCH_API_KEY`. It is Search Infinity, not an Ark chat Completions key, not the Volcengine Responses web_search plugin, and not AK/SK signing.
+- `DOUBAO_SEARCH_API_URL` defaults to `https://open.feedcoopapi.com` and calls `/search_api/web_search`.
+- Doubao Search is optional `web_search` reinforcement. It is not part of the `standard` minimum profile.
 
 Zhipu Coding Plan Remote MCP:
 
@@ -175,6 +160,7 @@ Exa domain filters:
 - Use `exa-search --include-domains` when official documentation domains are known.
 - Use `context7-library` / `context7-docs` for docs/API/SDK/library/framework intent when Context7 is configured.
 - Use `zhipu-search` for Chinese, domestic, current, or domain-filtered source discovery when Zhipu is configured.
+- Use `doubao-search` for the same Chinese/domestic/current discovery when Doubao Search is configured.
 - Use `exa-search --start-published-date` for recency-constrained source discovery.
 - Use `exa-similar` when a known good page is available and adjacent sources are needed.
 - Use `search --format content` when a human wants the selected channel output.

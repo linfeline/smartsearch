@@ -42,7 +42,7 @@ from .providers.openai_compatible import (
 from .providers.sciverse import SciverseProvider
 from .providers.tinyfish import TinyFishFetchProvider, TinyFishSearchProvider
 from .providers.xai_responses import XAIResponsesSearchProvider
-from .providers.yuanbao import YuanbaoSearchProvider
+from .providers.doubao import DoubaoWebSearchProvider
 from .providers.zhipu import ZhipuWebSearchProvider
 from .providers.zhipu_mcp import ZhipuMCPProvider
 from .provider_errors import (
@@ -83,6 +83,7 @@ DEEP_ALLOWED_TOOLS = {
     "exa-search",
     "exa-similar",
     "zhipu-search",
+    "doubao-search",
     "zhipu-mcp-search",
     "zhipu-mcp-reader",
     "zhipu-mcp-search-doc",
@@ -178,7 +179,7 @@ RESEARCH_JS_HEAVY_KEYWORDS = {
 RESEARCH_PDF_KEYWORDS = {"pdf", "arxiv", "论文", "paper", ".pdf"}
 RESEARCH_PROFILE_ORDER = {
     "main_search": ["xai-responses", "openai-compatible"],
-    "web_search": ["zhipu", "zhipu-mcp", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"],
+    "web_search": ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"],
     "docs_search": ["context7", "exa"],
     "web_fetch": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl", "tinyfish", "deepseek"],
     "vertical_search": ["anysearch"],
@@ -213,6 +214,15 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
         "minimum_profile_role": "docs_search",
         "quality_filters": ["URL required", "fetch before proof citation"],
         "route_reasons": ["official low-noise discovery", "paper/product discovery"],
+    },
+    "doubao": {
+        "capability": "web_search",
+        "strengths": ["Chinese", "domestic China", "current", "ByteDance index", "long snippets"],
+        "exclusions": ["web_fetch", "Ark chat Completions", "Volcengine AK/SK"],
+        "fallback_group": "web_search",
+        "minimum_profile_role": "",
+        "quality_filters": ["URL required", "fetch before proof citation"],
+        "route_reasons": ["Chinese/current/policy discovery"],
     },
     "zhipu": {
         "capability": "web_search",
@@ -308,6 +318,8 @@ PROVIDER_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 MAIN_SEARCH_FALLBACK_CHAIN = ["xai-responses", "openai-compatible"]
+WEB_SEARCH_FALLBACK_CHAIN = ["doubao", "zhipu", "zhipu-mcp", "tavily", "firecrawl"]
+WEB_SEARCH_BROAD_CHAIN = ["tavily", "firecrawl", "doubao", "zhipu", "zhipu-mcp"]
 MAIN_SEARCH_PROVIDER_ALIASES = {
     "xai-responses": {"xai-responses", "xai", "grok", "grok-web-tools"},
     "openai-compatible": {"openai-compatible", "openai", "chat-completions", "primary"},
@@ -988,6 +1000,8 @@ def _provider_configured(provider: str) -> bool:
         return bool(config.exa_api_key)
     if provider == "zhipu":
         return bool(config.zhipu_api_key)
+    if provider == "doubao":
+        return bool(config.doubao_search_api_key)
     if provider == "zhipu-mcp":
         return bool(config.zhipu_mcp_api_key)
     if provider == "tavily":
@@ -1064,6 +1078,94 @@ def _research_fetch_order(query: str, url: str = "", capability_status: dict[str
     ordered = [provider for provider in preferred if provider in providers]
     ordered.extend(provider for provider in providers if provider not in ordered)
     return _apply_research_overrides("web_fetch", ordered)
+
+
+def _research_route_signals(question: str, plan: dict[str, Any]) -> dict[str, Any]:
+    intent = plan.get("intent_signals") or {}
+    rules_route = build_rules_route(question, plan_intent_signals=intent, mode="rules")
+    text = question.lower()
+    return {
+        "docs_api_intent": rules_route.docs_intent,
+        "official_low_noise_intent": _contains_any(question, DEEP_EXA_DISCOVERY_KEYWORDS),
+        "current_or_locale_intent": rules_route.web_current_intent,
+        "known_url": rules_route.fetch_intent,
+        "pdf_or_arxiv_intent": _contains_any(question, RESEARCH_PDF_KEYWORDS),
+        "js_heavy_intent": _contains_any(question, RESEARCH_JS_HEAVY_KEYWORDS),
+        "vertical_intent": bool(rules_route.intent_signals.get("vertical_intent")),
+        "claim_risk": intent.get("claim_risk", "medium"),
+        "cross_validation_need": intent.get("cross_validation_need", "normal"),
+        "raw_query": text,
+    }
+
+
+def _research_capability_routes(
+    question: str,
+    plan: dict[str, Any],
+    fallback: str,
+    capability_status: dict[str, Any] | None = None,
+    route_result: IntentRouteResult | None = None,
+) -> dict[str, Any]:
+    signals = _research_route_signals(question, plan)
+    if route_result is not None:
+        signals["docs_api_intent"] = route_result.docs_intent
+        signals["current_or_locale_intent"] = route_result.web_current_intent
+        signals["known_url"] = route_result.fetch_intent
+        signals["vertical_intent"] = bool(route_result.intent_signals.get("vertical_intent") or "vertical_search" in route_result.required_capabilities)
+    _, _, invalid_overrides = _safe_provider_overrides()
+    routes: dict[str, Any] = {
+        "signals": signals,
+        "fallback_mode": fallback,
+        "route_policy_version": RESEARCH_ROUTE_POLICY_VERSION,
+        "invalid_provider_overrides": invalid_overrides,
+        "capabilities": {},
+    }
+    if route_result is not None:
+        route_data = route_result.to_dict()
+        for key in (
+            "intent_router_mode",
+            "required_capabilities",
+            "intent_signals",
+            "confidence",
+            "router_engines_used",
+            "degraded",
+            "degraded_reason",
+            "reasons",
+        ):
+            routes[key] = route_data.get(key)
+
+    web_search = _configured_for_capability("web_search", capability_status)
+    if signals["current_or_locale_intent"]:
+        ordered = [provider for provider in WEB_SEARCH_FALLBACK_CHAIN if provider in web_search]
+    else:
+        ordered = [provider for provider in WEB_SEARCH_BROAD_CHAIN if provider in web_search]
+    routes["capabilities"]["web_search"] = {
+        "providers": _apply_research_overrides("web_search", ordered),
+        "reason": "current/locale evidence" if signals["current_or_locale_intent"] else "broad source discovery",
+    }
+
+    docs = _configured_for_capability("docs_search", capability_status)
+    docs_order = [provider for provider in ["context7", "exa"] if provider in docs]
+    if signals["official_low_noise_intent"] and not signals["docs_api_intent"]:
+        docs_order = [provider for provider in ["exa", "context7"] if provider in docs]
+    routes["capabilities"]["docs_search"] = {
+        "providers": _apply_research_overrides("docs_search", docs_order),
+        "reason": "docs/API evidence" if signals["docs_api_intent"] else "official low-noise discovery",
+    }
+
+    fetch_order = _research_fetch_order(question, capability_status=capability_status)
+    routes["capabilities"]["web_fetch"] = {
+        "providers": fetch_order,
+        "reason": "JS-heavy fetch" if signals["js_heavy_intent"] else ("known URL/PDF extraction" if signals["known_url"] or signals["pdf_or_arxiv_intent"] else "evidence extraction"),
+    }
+
+    vertical = _configured_for_capability("vertical_search", capability_status)
+    routes["capabilities"]["vertical_search"] = {
+        "providers": _apply_research_overrides("vertical_search", vertical) if signals["vertical_intent"] else [],
+        "reason": "vertical intent matched" if signals["vertical_intent"] else "vertical intent absent",
+        "experimental": True,
+    }
+
+    return routes
 
 
 def _research_evidence_item(
@@ -1526,6 +1628,7 @@ def get_capability_status() -> dict[str, Any]:
             "configured": [
                 name
                 for name, enabled in [
+                    ("doubao", _provider_configured("doubao")),
                     ("zhipu", _provider_configured("zhipu")),
                     ("zhipu-mcp", _provider_configured("zhipu-mcp")),
                     ("tavily", _provider_configured("tavily")),
@@ -1536,7 +1639,7 @@ def get_capability_status() -> dict[str, Any]:
                 ]
                 if enabled
             ],
-            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"],
+            "fallback_chain": list(WEB_SEARCH_FALLBACK_CHAIN),
         },
         "docs_search": {
             "configured": [
@@ -1898,6 +2001,151 @@ async def _run_web_fetch_fallback(
         except Exception as e:
             attempts.append(_attempt_with_health("web_fetch", provider, start, e))
     return None, attempts
+
+
+async def _run_web_search_fallback(
+    query: str,
+    count: int = 5,
+    providers: str = "auto",
+    fallback: str = "auto",
+) -> tuple[list[dict], list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
+    attempts: list[dict] = []
+    configured = [provider for provider in WEB_SEARCH_FALLBACK_CHAIN if _provider_configured(provider)]
+    if provider_filter is not None:
+        configured = [provider for provider in provider_filter if provider in configured]
+    if fallback == "off":
+        configured = configured[:1]
+
+    for provider in configured:
+        start = time.time()
+        try:
+            if provider == "doubao":
+                data = await doubao_search(query, count=count)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "doubao")
+                    if sources:
+                        attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = _attempt_status_for_result(data)
+                attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "zhipu":
+                data = await zhipu_search(query, count=count)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "zhipu")
+                    if sources:
+                        attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = _attempt_status_for_result(data)
+                attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "zhipu-mcp":
+                data = await zhipu_mcp_search(query, count=count)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "zhipu-mcp")
+                    if sources:
+                        attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = _attempt_status_for_result(data)
+                attempts.append(_attempt("web_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "tavily":
+                results = await call_tavily_search(query, count)
+                sources = _normalize_source_results(results, "tavily")
+                if sources:
+                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                    return sources, attempts
+                attempts.append(_attempt("web_search", provider, "empty", start))
+            elif provider == "firecrawl":
+                results = await call_firecrawl_search(query, count)
+                sources = _normalize_source_results(results, "firecrawl")
+                if sources:
+                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                    return sources, attempts
+                attempts.append(_attempt("web_search", provider, "empty", start))
+        except Exception as e:
+            attempts.append(_attempt_from_exception("web_search", provider, start, e))
+    return [], attempts
+
+
+async def _run_docs_search_fallback(
+    query: str,
+    providers: str = "auto",
+    fallback: str = "auto",
+) -> tuple[list[dict], list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
+    attempts: list[dict] = []
+    configured: list[str] = []
+    if _provider_configured("context7"):
+        configured.append("context7")
+    if _provider_configured("exa"):
+        configured.append("exa")
+    if provider_filter is not None:
+        configured = [p for p in configured if p in provider_filter]
+    if fallback == "off":
+        configured = configured[:1]
+
+    for provider in configured:
+        start = time.time()
+        try:
+            if provider == "exa":
+                data = await exa_search(query, num_results=5, include_highlights=True)
+                if data.get("ok"):
+                    sources = _normalize_source_results(data.get("results"), "exa")
+                    if sources:
+                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources)))
+                        return sources, attempts
+                status = _attempt_status_for_result(data)
+                attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+            elif provider == "context7":
+                data = await context7_library(query, query)
+                if data.get("ok"):
+                    selected_library = _select_context7_library_candidate(data.get("results"), query)
+                    if selected_library:
+                        source = {
+                            "url": f"context7:{selected_library.get('id')}",
+                            "title": selected_library.get("title") or selected_library.get("id") or "Context7",
+                            "description": selected_library.get("description") or "",
+                            "provider": "context7",
+                        }
+                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=1))
+                        return [source], attempts
+                    attempts.append(_attempt("docs_search", provider, "empty", start))
+                else:
+                    status = _attempt_status_for_result(data)
+                    attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+        except Exception as e:
+            attempts.append(_attempt_from_exception("docs_search", provider, start, e))
+    return [], attempts
+
+
+async def _run_vertical_search_fallback(
+    query: str,
+    providers: str = "auto",
+    fallback: str = "auto",
+) -> tuple[list[dict], list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
+    attempts: list[dict] = []
+    configured: list[str] = []
+    if config.anysearch_api_key:
+        configured.append("anysearch")
+    if provider_filter is not None:
+        configured = [p for p in configured if p in provider_filter]
+    if fallback == "off":
+        configured = configured[:1]
+
+    for provider in configured:
+        start = time.time()
+        try:
+            data = await anysearch_search(query, max_results=5)
+            if data.get("ok"):
+                sources = _normalize_source_results(data.get("results"), "anysearch")
+                if sources:
+                    attempts.append(_attempt("vertical_search", provider, "ok", start, result_count=len(sources)))
+                    return sources, attempts
+            status = _attempt_status_for_result(data)
+            attempts.append(_attempt("vertical_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+        except Exception as e:
+            attempts.append(_attempt_from_exception("vertical_search", provider, start, e))
+    return [], attempts
 
 
 def _provider_response_object(data: Any, provider: str) -> dict[str, Any]:
@@ -2686,6 +2934,43 @@ async def exa_find_similar(url: str, num_results: int = 5) -> dict[str, Any]:
     return data
 
 
+async def doubao_search(
+    query: str,
+    count: int = 10,
+    time_range: str = "",
+    sites: str = "",
+    auth_level: int = 0,
+    need_content: bool = True,
+) -> dict[str, Any]:
+    api_key = config.doubao_search_api_key
+    if not api_key:
+        return {
+            "ok": False,
+            "error_type": "config_error",
+            "error": "DOUBAO_SEARCH_API_KEY 未配置。请运行 `smart-search setup`，或使用 `smart-search config set DOUBAO_SEARCH_API_KEY <key>`。",
+        }
+    provider = DoubaoWebSearchProvider(
+        config.doubao_search_api_url,
+        api_key,
+        config.doubao_search_timeout,
+    )
+    raw = await provider.search(
+        query=query,
+        count=count,
+        time_range=time_range,
+        sites=sites,
+        auth_level=auth_level,
+        need_content=need_content,
+    )
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": False, "error_type": "parse_error", "error": raw}
+    if not data.get("ok", False):
+        data.setdefault("error_type", "network_error")
+    return data
+
+
 async def zhipu_search(
     query: str,
     count: int = 10,
@@ -3403,6 +3688,15 @@ async def _test_jina_connection() -> dict[str, Any]:
     return {"status": status, "message": data.get("error", source_message('Jina Reader 不可用')), "response_time_ms": response_time}
 
 
+async def _test_doubao_connection() -> dict[str, Any]:
+    if not config.doubao_search_api_key:
+        return {"status": "not_configured", "message": "DOUBAO_SEARCH_API_KEY 未设置，豆包搜索功能不可用"}
+    result = await doubao_search("test", count=1)
+    if result.get("ok"):
+        return {"status": "ok", "message": "豆包搜索可用", "response_time_ms": result.get("elapsed_ms", 0)}
+    return {"status": "warning", "message": result.get("error", "豆包搜索不可用"), "response_time_ms": result.get("elapsed_ms", 0)}
+
+
 async def _test_zhipu_connection() -> dict[str, Any]:
     if disabled := _provider_disabled_result("zhipu"):
         return disabled
@@ -3794,6 +4088,13 @@ async def doctor() -> dict[str, Any]:
     info["firecrawl_connection_test"] = {**await _test_firecrawl_presence(), "probe": "presence"}
 
     try:
+        info["doubao_connection_test"] = await _test_doubao_connection()
+    except httpx.TimeoutException:
+        info["doubao_connection_test"] = {"status": "timeout", "message": "豆包搜索 API 请求超时"}
+    except Exception as e:
+        info["doubao_connection_test"] = {"status": "error", "message": sanitize_provider_error_message(e)}
+
+    try:
         info["zhipu_connection_test"] = await _test_zhipu_connection()
     except httpx.TimeoutException:
         info["zhipu_connection_test"] = {"status": "timeout", "message": source_message('智谱 API 请求超时')}
@@ -4093,7 +4394,7 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
             "fallback_chain": MAIN_SEARCH_FALLBACK_CHAIN,
             "ok": True,
         },
-        "web_search": {"configured": ["zhipu"], "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"], "ok": True},
+        "web_search": {"configured": ["zhipu"], "fallback_chain": list(WEB_SEARCH_FALLBACK_CHAIN), "ok": True},
         "docs_search": {"configured": ["context7"], "fallback_chain": ["context7", "exa"], "ok": True},
         "web_fetch": {"configured": ["tavily"], "fallback_chain": ["tavily", "jina", "zhipu-mcp-reader", "firecrawl", "tinyfish", "deepseek"], "ok": True},
         "vertical_search": {
@@ -4323,8 +4624,8 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
     mock_research_status = {
         **minimum_status,
         "web_search": {
-            "configured": ["zhipu", "zhipu-mcp", "tavily", "firecrawl", "tinyfish"],
-            "fallback_chain": ["zhipu", "zhipu-mcp", "tavily", "firecrawl", "tinyfish", "deepseek", "yuanbao"],
+            "configured": ["zhipu", "zhipu-mcp", "tavily", "firecrawl"],
+            "fallback_chain": list(WEB_SEARCH_FALLBACK_CHAIN),
             "ok": True,
         },
         "docs_search": {"configured": ["context7", "exa"], "fallback_chain": ["context7", "exa"], "ok": True},
@@ -4442,6 +4743,25 @@ async def _smoke_live(start: float) -> dict[str, Any]:
         )
     else:
         cases.append(_skipped_case("zhipu search", "ZHIPU_API_KEY not configured"))
+
+    doubao_status = doctor_result.get("doubao_connection_test", {})
+    if config.doubao_search_api_key:
+        doubao_ok = doubao_status.get("status") == "ok"
+        web_fallback_available = len(capability_status.get("web_search", {}).get("configured", [])) > 1
+        cases.append(
+            _case(
+                "doubao search",
+                doubao_ok,
+                {
+                    "status": doubao_status.get("status", ""),
+                    "error": doubao_status.get("message", ""),
+                    "severity": "" if doubao_ok else ("degraded" if web_fallback_available else "critical"),
+                    "fallback_available": web_fallback_available,
+                },
+            )
+        )
+    else:
+        cases.append(_skipped_case("doubao search", "DOUBAO_SEARCH_API_KEY not configured"))
 
     context7_status = doctor_result.get("context7_connection_test", {})
     if config.context7_api_key:

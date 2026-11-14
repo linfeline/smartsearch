@@ -15,7 +15,7 @@ This compatibility entrypoint no longer stores the full CLI contract. Read the f
 
 - Need to choose or explain a search/docs/fetch route: read `provider-routing.md`, then `command-patterns.md`.
 - Need command syntax, aliases, output fields, or exit codes: read `cli-core.md`.
-- Need setup, API keys, config paths, skill update behavior, or provider endpoint flags: read `setup-config.md`.
+- Need setup, API keys, config paths, skill update behavior, provider endpoint flags, the `smart-search ui` config page, or per-provider key testing: read `setup-config.md`.
 - Need deep search, deep research, multi-source verification, serious review, or selection/comparison research: read `deep-research-mode.md`.
 - Need timeout recovery, saved evidence files, or source-first fallback examples: read `command-patterns.md`.
 - Need release, npm/mise packaged install, or regression expectations: read `regression-release.md`.

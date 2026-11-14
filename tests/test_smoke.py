@@ -9,7 +9,7 @@ def test_minimum_profile_reports_missing_categories(monkeypatch):
     result = service.validate_minimum_profile()
 
     assert result["ok"] is False
-    assert set(result["missing"]) == {"main_search", "docs_search", "web_fetch"}
+    assert set(result["missing"]) == {"retrieval"}
     assert "capability_status" in result
 
 
@@ -238,6 +238,7 @@ async def test_fetch_attempts_show_fallback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_search_docs_intent_uses_docs_fallback(monkeypatch):
+    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "local")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
     monkeypatch.setenv("EXA_API_KEY", "exa-secret")
@@ -250,12 +251,10 @@ async def test_search_docs_intent_uses_docs_fallback(monkeypatch):
     async def fake_context7(name, query=""):
         return {"ok": True, "results": [{"id": "/reactjs/react.dev", "title": "React", "description": "UI"}], "total": 1}
 
-    async def fake_context7_docs(library_id, query):
-        return {"ok": True, "library_id": library_id, "content": f"Verified docs for {query}"}
-
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "context7_library", fake_context7)
-    monkeypatch.setattr(service, "context7_docs", fake_context7_docs)
+    async def docs(*args): return {"ok": True, "content": "React documentation"}
+    monkeypatch.setattr(service, "context7_docs", docs)
 
     result = await service.search("React useEffect API docs", validation="balanced")
 
@@ -285,6 +284,8 @@ async def test_search_docs_intent_falls_back_to_exa_after_context7_empty(monkeyp
 
     monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
     monkeypatch.setattr(service, "context7_library", fake_context7)
+    async def docs(*args): return {"ok": True, "content": "React documentation"}
+    monkeypatch.setattr(service, "context7_docs", docs)
     monkeypatch.setattr(service, "exa_search", fake_exa)
 
     result = await service.search("React useEffect API docs", validation="balanced")

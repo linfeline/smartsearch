@@ -20,6 +20,7 @@ function readTree(root) {
   while (pending.length) {
     const current = pending.pop();
     for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      if (entry.name === ".DS_Store") continue;
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);

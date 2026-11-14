@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Verify every final provider, package, secret and release gate."}
-{"file":".trellis/tasks/08-07-stable-release-015/prd.md","reason":"Perform final cross-child acceptance against the owner-approved release scope."}

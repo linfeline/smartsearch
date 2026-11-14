@@ -1,0 +1,69 @@
+name: Build self-contained npm CLI
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: true
+      version:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    name: npm CLI / ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      MISE_DISABLE_TOOLS: dotnet,swift,pipx:dmgbuild,uv,shellcheck,actionlint
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin, arch: arm64, runner: macos-15 }
+          - { platform: darwin, arch: x64, runner: macos-15-intel }
+          - { platform: win32, arch: x64, runner: windows-latest }
+          - { platform: win32, arch: arm64, runner: windows-11-arm }
+          - { platform: linux, arch: x64, runner: ubuntu-22.04 }
+          - { platform: linux, arch: arm64, runner: ubuntu-22.04-arm }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: jdx/mise-action@v4
+      - name: Select release version
+        if: inputs.version != ''
+        env:
+          CLI_VERSION: ${{ inputs.version }}
+        run: mise run node npm/scripts/set-package-version.js "$CLI_VERSION"
+      - name: Install build tools
+        run: mise run npm:binary:install
+      - name: Build and verify runtime
+        run: |
+          mise run desktop:cli:build --result-file .desktop-artifacts/npm-backend.json
+          mise run npm:binary:package --manifest .desktop-artifacts/npm-backend.json --output .desktop-artifacts/npm-platform
+      - name: Test launcher and real packed installation without Python
+        run: |
+          mise run npm:test
+          mise run npm:binary:smoke .desktop-artifacts/npm-platform
+      - name: Pack platform artifact
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          mise run node -e "const p=require('./.desktop-artifacts/npm-platform/package.json'); if(p.os[0]!==process.env.EXPECTED_PLATFORM || p.cpu[0]!==process.env.EXPECTED_ARCH) process.exit(1); require('fs').mkdirSync('.desktop-artifacts/npm-tarballs');"
+          mise run npm:pack ./.desktop-artifacts/npm-platform --pack-destination .desktop-artifacts/npm-tarballs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: npm-cli-${{ matrix.platform }}-${{ matrix.arch }}
+          path: .desktop-artifacts/npm-tarballs/*.tgz
+          include-hidden-files: true
+          if-no-files-found: error

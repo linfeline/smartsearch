@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Verify package contents, install-health, beta/stable lane and skill parity requirements."}
-{"file":".trellis/tasks/08-07-ci-and-package-hardening/prd.md","reason":"Check all CI matrix and release workflow acceptance criteria."}

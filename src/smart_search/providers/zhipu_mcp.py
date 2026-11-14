@@ -1,3 +1,4 @@
+from ..i18n import source_message
 import json
 import re
 import time
@@ -164,11 +165,11 @@ class ZhipuMCPProvider:
         data = _parse_sse_or_json(response)
         if "error" in data:
             message = _jsonrpc_error_message(data)
-            raise ZhipuMCPSessionError(message or "Zhipu MCP initialize failed.")
+            raise ZhipuMCPSessionError(message or source_message('Zhipu MCP initialize failed.'))
 
         session_id = (response.headers.get("Mcp-Session-Id") or "").strip()
         if not session_id:
-            raise ZhipuMCPSessionError("Zhipu MCP initialize response did not include Mcp-Session-Id.")
+            raise ZhipuMCPSessionError(source_message('Zhipu MCP initialize response did not include Mcp-Session-Id.'))
         self._session_id = session_id
         return session_id
 
@@ -181,7 +182,7 @@ class ZhipuMCPProvider:
                     "provider": self.provider_id,
                     "tool": name,
                     "error_type": "config_error",
-                    "error": "ZHIPU_MCP_API_KEY is not configured.",
+                    "error": source_message('ZHIPU_MCP_API_KEY is not configured.'),
                     "elapsed_ms": _elapsed_ms(start),
                 },
                 ensure_ascii=False,

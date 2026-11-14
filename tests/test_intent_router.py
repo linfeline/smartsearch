@@ -1,221 +1,121 @@
+import json
+
+import httpx
 import pytest
 
 from smart_search import service
-from smart_search.intent_router import IntentRouter
+from smart_search.jev import JevClient
 
 
 @pytest.mark.asyncio
-async def test_route_hybrid_degrades_to_rules_when_remote_router_unconfigured(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
+@pytest.mark.parametrize("mode,effective", [("hybrid", "jev"), ("jev", "jev"), ("rules", "local"), ("off", "local"), ("local", "local")])
+async def test_legacy_modes_preserve_configuration_without_legacy_requests(monkeypatch, mode, effective):
+    values = {
+        "SMART_SEARCH_INTENT_ROUTER": mode,
+        "INTENT_EMBEDDING_API_URL": "https://retired.example/embeddings",
+        "INTENT_EMBEDDING_API_KEY": "retained-embedding-secret",
+        "INTENT_EMBEDDING_MODEL": "old-embedding",
+        "INTENT_EMBEDDING_THRESHOLD": "invalid-unused-value",
+        "INTENT_CLASSIFIER_API_URL": "https://retired.example/chat/completions",
+        "INTENT_CLASSIFIER_API_KEY": "retained-classifier-secret",
+        "INTENT_CLASSIFIER_MODEL": "old-classifier",
+        "EXA_API_KEY": "exa-test",
+    }
+    service.config.config_file.write_text(json.dumps(values), encoding="utf-8")
+    before = service.config.config_file.read_bytes()
 
-    result = await service.route("React useEffect API docs")
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("legacy settings must not cause an HTTP request")
 
-    assert result["ok"] is True
-    assert result["intent_router_mode"] == "hybrid"
-    assert result["required_capabilities"] == ["docs_search"]
-    assert result["docs_intent"] is True
-    assert result["degraded"] is True
-    assert "embeddings not configured" in result["degraded_reason"]
-    assert "classifier not configured" in result["degraded_reason"]
-    assert result["executed_search"] is False
+    async def retrieve(*args, **kwargs):
+        return {"ok": True, "results": [{"url": "https://example.org/source", "content": "Retrieved text"}]}
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)
+    monkeypatch.setattr(service, "exa_search", retrieve)
+    route = await service.route("React useEffect docs")
+    result = await service.search("React useEffect docs")
+    assert route["ok"] and result["ok"]
+    assert service.config.intent_router_mode == effective
+    assert service.config.effective_values()["SMART_SEARCH_INTENT_ROUTER"] == effective
+    assert service.config.config_file.read_bytes() == before
+    assert service.config.get_config_info()["config_parameter_errors"] == []
+    assert result["routing_decision"]["router_engines_used"] == ["rules"]
+    service.config.set_config_value("EXA_API_KEY", "replacement-exa-secret")
+    saved = service.config.get_saved_config(masked=False)
+    assert saved["INTENT_EMBEDDING_API_KEY"] == values["INTENT_EMBEDDING_API_KEY"]
+    assert saved["INTENT_CLASSIFIER_API_KEY"] == values["INTENT_CLASSIFIER_API_KEY"]
+    assert saved["SMART_SEARCH_INTENT_ROUTER"] == mode
 
 
 @pytest.mark.asyncio
 async def test_route_outputs_multiple_capabilities_for_url_verification(monkeypatch):
     monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "rules")
-
     result = await service.route("请核验这个链接里的说法 https://example.com/source", validation="strict")
-
-    assert result["ok"] is True
+    assert result["ok"]
     assert set(result["required_capabilities"]) == {"web_search", "web_fetch"}
-    assert result["fetch_intent"] is True
-    assert result["web_current_intent"] is False
-    assert result["intent_signals"]["strict_validation"] is True
+    assert result["fetch_intent"]
+    assert not result["web_current_intent"]
+    assert result["intent_signals"]["strict_validation"]
+    assert not result["executed_search"]
+
+
+@pytest.mark.parametrize("query, docs, vertical", [
+    ("What is the capital of France", False, False),
+    ("rapid prototyping methods", False, False),
+    ("nuclear reactor safety", False, False),
+    ("annual report 2025 revenue", False, False),
+    ("lawn care tips", False, False),
+    ("React useEffect cleanup", True, False),
+    ("python3 asyncio", True, False),
+    ("Vue3 composition API", True, False),
+    ("调用api接口超时", True, False),
+    ("list of web frameworks", True, False),
+    ("Next.js app router", True, False),
+    ("github repos about rust", False, True),
+])
+def test_docs_and_vertical_keywords_match_whole_words(query, docs, vertical):
+    route = service.build_rules_route(query, mode="rules")
+    assert (route.docs_intent, route.intent_signals["vertical_intent"]) == (docs, vertical)
 
 
 @pytest.mark.asyncio
-async def test_route_keeps_zh_current_field_narrow_for_english_current_queries(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "rules")
-
-    result = await service.route("today AI news")
-
-    assert result["zh_current_intent"] is False
-    assert result["web_current_intent"] is True
+async def test_route_keeps_zh_current_field_narrow_for_english_current_queries():
+    result = await service.route("today AI news", mode="local")
+    assert not result["zh_current_intent"]
+    assert result["web_current_intent"]
     assert result["required_capabilities"] == ["web_search"]
 
 
 @pytest.mark.asyncio
-async def test_search_routing_decision_keeps_old_fields_and_adds_new_router_fields(monkeypatch):
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
-    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
-    monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
-    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+async def test_remote_preview_requires_explicit_opt_in_and_respects_local_override(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "jev-test")
+    monkeypatch.setenv("EXA_API_KEY", "exa-test")
+    calls = []
 
-    async def fake_search(self, query, platform="", ctx=None):
-        return "Docs answer."
+    async def judge(self, state, questions, timeout):
+        calls.append(state)
+        return {"answers": {key: {"type": "noul", "noul": 0.95} for key in questions}}
 
-    async def fake_docs_search(query, providers="auto", fallback="auto"):
-        return [{"url": "context7:/reactjs/react.dev", "provider": "context7"}], [
-            {"capability": "docs_search", "provider": "context7", "status": "ok", "elapsed_ms": 1, "result_count": 1}
-        ]
-
-    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
-    monkeypatch.setattr(service, "_run_docs_search_fallback", fake_docs_search)
-
-    result = await service.search("React useEffect API docs", validation="balanced")
-    routing = result["routing_decision"]
-
-    assert result["ok"] is True
-    assert routing["docs_intent"] is True
-    assert routing["zh_current_intent"] is False
-    assert routing["web_current_intent"] is False
-    assert routing["fetch_intent"] is False
-    assert routing["supplemental_paths"] == ["docs_search"]
-    assert routing["required_capabilities"] == ["docs_search"]
-    assert routing["intent_router_mode"] == "hybrid"
-    assert "rules" in routing["router_engines_used"]
-    assert routing["degraded"] is True
+    monkeypatch.setattr(JevClient, "_request", judge)
+    assert (await service.route("Find sources"))["executed_search"] is False
+    assert (await service.route("Find sources", mode="off", allow_remote=True))["executed_search"] is False
+    assert calls == []
+    result = await service.route("Find sources", mode="hybrid", allow_remote=True)
+    assert result["ok"]
+    assert len(calls) == 1
+    assert len(result["selected_channels"]) == 1
+    assert result["provider_selection"] == "jev"
 
 
-@pytest.mark.asyncio
-async def test_classifier_ignores_unknown_capabilities_and_provider_names(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/chat/completions")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
-    monkeypatch.setenv("INTENT_CLASSIFIER_MODEL", "intent-mini")
+def test_deep_planner_is_offline_with_remote_credentials(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "jev-test")
+    monkeypatch.setenv("INTENT_CLASSIFIER_API_KEY", "retired-secret")
 
-    async def fake_classifier_route(self, query, rules, semantic):
-        return {
-            "required_capabilities": ["web_search", "openai-compatible", "docs_search"],
-            "intent_signals": {"provider": "zhipu", "classifier_signal": True},
-            "confidence": 0.91,
-            "reasons": ["needs current sources"],
-            "provider": "zhipu",
-        }
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("offline planner must not call a provider")
 
-    monkeypatch.setattr(IntentRouter, "_classifier_route", fake_classifier_route)
-
-    result = await service.route("今天国内 AI 新闻")
-
-    assert set(result["required_capabilities"]) == {"web_search", "docs_search"}
-    assert "openai-compatible" not in result["required_capabilities"]
-    assert result["intent_signals"]["classifier_signal"] is True
-    assert "provider" not in result["intent_signals"]
-    assert any("ignored unknown capability" in reason for reason in result["reasons"])
-    assert any("provider choices were ignored" in reason for reason in result["reasons"])
-    assert "classifier" in result["router_engines_used"]
-
-
-@pytest.mark.asyncio
-async def test_classifier_cannot_add_web_search_without_current_or_validation_signal(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/chat/completions")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
-    monkeypatch.setenv("INTENT_CLASSIFIER_MODEL", "intent-mini")
-
-    async def fake_classifier_route(self, query, rules, semantic):
-        return {
-            "required_capabilities": ["docs_search", "web_search"],
-            "confidence": 0.9,
-            "reasons": ["tutorial-style explanation could use broad web search"],
-        }
-
-    monkeypatch.setattr(IntentRouter, "_classifier_route", fake_classifier_route)
-
-    result = await service.route("中文解释 Python 函数")
-
-    assert result["required_capabilities"] == ["docs_search"]
-    assert result["web_current_intent"] is False
-    assert any("ignored unsupported capability" in reason for reason in result["reasons"])
-
-
-@pytest.mark.asyncio
-async def test_semantic_router_can_add_capability_without_classifier(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_URL", "https://embed.example.com/embeddings")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_KEY", "embed-secret")
-    monkeypatch.setenv("INTENT_EMBEDDING_MODEL", "embed-model")
-
-    async def fake_semantic_route(self, query):
-        return {"scores": {"docs_search": 0.76, "web_search": 0.1}}
-
-    monkeypatch.setattr(IntentRouter, "_semantic_route", fake_semantic_route)
-
-    result = await service.route("这个 SDK 怎么接入")
-
-    assert "docs_search" in result["required_capabilities"]
-    assert "embeddings" in result["router_engines_used"]
-    assert result["intent_signals"]["semantic_docs_search_score"] == 0.76
-    assert "classifier not configured" in result["degraded_reason"]
-
-
-@pytest.mark.asyncio
-async def test_semantic_router_marks_ambiguous_margin_without_adding_capability(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_URL", "https://embed.example.com/embeddings")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_KEY", "embed-secret")
-    monkeypatch.setenv("INTENT_EMBEDDING_MODEL", "embed-model")
-    monkeypatch.setenv("INTENT_EMBEDDING_THRESHOLD", "0.74")
-    monkeypatch.setenv("INTENT_EMBEDDING_MARGIN", "0.05")
-
-    async def fake_semantic_route(self, query):
-        return {"scores": {"web_search": 0.81, "docs_search": 0.79}}
-
-    monkeypatch.setattr(IntentRouter, "_semantic_route", fake_semantic_route)
-
-    result = await service.route("普通问题")
-
-    assert result["required_capabilities"] == []
-    assert result["intent_signals"]["semantic_top_capability"] == "web_search"
-    assert result["intent_signals"]["semantic_passed_threshold"] is True
-    assert result["intent_signals"]["semantic_passed_margin"] is False
-    assert any("embeddings ambiguous" in reason for reason in result["reasons"])
-
-
-@pytest.mark.asyncio
-async def test_classifier_can_add_capability_when_semantic_is_ambiguous(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_URL", "https://embed.example.com/embeddings")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_KEY", "embed-secret")
-    monkeypatch.setenv("INTENT_EMBEDDING_MODEL", "embed-model")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/chat/completions")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
-    monkeypatch.setenv("INTENT_CLASSIFIER_MODEL", "intent-mini")
-    monkeypatch.setenv("INTENT_EMBEDDING_THRESHOLD", "0.74")
-    monkeypatch.setenv("INTENT_EMBEDDING_MARGIN", "0.05")
-
-    async def fake_semantic_route(self, query):
-        return {"scores": {"docs_search": 0.82, "web_search": 0.8}}
-
-    async def fake_classifier_route(self, query, rules, semantic):
-        return {"required_capabilities": ["docs_search"], "confidence": 0.9, "reasons": ["docs intent"]}
-
-    monkeypatch.setattr(IntentRouter, "_semantic_route", fake_semantic_route)
-    monkeypatch.setattr(IntentRouter, "_classifier_route", fake_classifier_route)
-
-    result = await service.route("普通问题")
-
-    assert result["required_capabilities"] == ["docs_search"]
-    assert any("embeddings ambiguous" in reason for reason in result["reasons"])
-    assert any("classifier: docs intent" in reason for reason in result["reasons"])
-
-
-def test_deep_research_plan_uses_offline_rules_even_when_remote_router_configured(monkeypatch):
-    monkeypatch.setenv("SMART_SEARCH_INTENT_ROUTER", "hybrid")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_URL", "https://embed.example.com/embeddings")
-    monkeypatch.setenv("INTENT_EMBEDDING_API_KEY", "embed-secret")
-    monkeypatch.setenv("INTENT_EMBEDDING_MODEL", "embed-model")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_URL", "https://classifier.example.com/chat/completions")
-    monkeypatch.setenv("INTENT_CLASSIFIER_API_KEY", "classifier-secret")
-    monkeypatch.setenv("INTENT_CLASSIFIER_MODEL", "intent-mini")
-
-    async def should_not_run_remote(*args, **kwargs):
-        raise AssertionError("deep planner must not call remote intent router components")
-
-    monkeypatch.setattr(IntentRouter, "_semantic_route", should_not_run_remote)
-    monkeypatch.setattr(IntentRouter, "_classifier_route", should_not_run_remote)
-
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)
     result = service.build_deep_research_plan("React useEffect API docs")
-
-    assert result["ok"] is True
-    assert result["intent_signals"]["docs_api_intent"] is True
+    assert result["ok"]
+    assert result["intent_signals"]["docs_api_intent"]
+    assert result["preflight"]["executed_by_deep_command"] is False

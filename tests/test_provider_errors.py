@@ -39,6 +39,7 @@ def test_http_statuses_use_the_stable_provider_error_taxonomy(status_code, error
         (httpx.ConnectError("offline"), "network_error"),
         (json.JSONDecodeError("bad JSON", "not-json", 0), "parse_error"),
         (ProviderCallError("provider_error", "tool rejected the request"), "provider_error"),
+        (ProviderCallError("quality_error", "challenge page"), "quality_error"),
     ],
 )
 def test_non_http_failures_use_the_stable_provider_error_taxonomy(exc, error_type):

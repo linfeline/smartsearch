@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Verify truthful provider controls, same-capability fallback and smoke output compatibility."}
-{"file":".trellis/tasks/08-07-provider-controls-and-diagnostics/prd.md","reason":"Check every disabled, taxonomy and smoke acceptance scenario."}

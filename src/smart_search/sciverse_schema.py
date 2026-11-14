@@ -1,6 +1,7 @@
 """Local normalization for the current public Sciverse request schemas."""
 
 from __future__ import annotations
+from .i18n import source_message
 
 import math
 from typing import Any
@@ -77,7 +78,7 @@ def split_sciverse_csv(values: list[str] | str | None) -> list[str]:
     elif isinstance(values, (list, tuple)):
         raw_values = values
     else:
-        raise SciverseParameterError("Sciverse CSV values must be a string or list")
+        raise SciverseParameterError(source_message('Sciverse CSV values must be a string or list'))
     normalized: list[str] = []
     for value in raw_values:
         text = str(value).strip()
@@ -88,7 +89,7 @@ def split_sciverse_csv(values: list[str] | str | None) -> list[str]:
 
 def _non_empty_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise SciverseParameterError(f"{label} must be a non-empty string")
+        raise SciverseParameterError(source_message('{0} must be a non-empty string', label))
     return value.strip()
 
 
@@ -97,7 +98,7 @@ def _normalize_filter_operator(value: Any, label: str) -> str:
     operator = _FILTER_OPERATOR_ALIASES.get(text)
     if operator is None:
         allowed = ", ".join(sorted(SCIVERSE_FILTER_OPERATORS))
-        raise SciverseParameterError(f"{label} must be one of {allowed}")
+        raise SciverseParameterError(source_message('{0} must be one of {1}', label, allowed))
     return operator
 
 
@@ -106,25 +107,25 @@ def _normalize_sort_order(value: Any, label: str) -> str:
     order = _SORT_ORDER_ALIASES.get(text)
     if order is None:
         allowed = ", ".join(sorted(SCIVERSE_SORT_ORDERS))
-        raise SciverseParameterError(f"{label} must be one of {allowed}")
+        raise SciverseParameterError(source_message('{0} must be one of {1}', label, allowed))
     return order
 
 
 def _validate_json_value(value: Any, label: str) -> None:
     if value is None:
-        raise SciverseParameterError(f"{label} must not be null")
+        raise SciverseParameterError(source_message('{0} must not be null', label))
     if isinstance(value, float) and not math.isfinite(value):
-        raise SciverseParameterError(f"{label} must be finite")
+        raise SciverseParameterError(source_message('{0} must be finite', label))
     if isinstance(value, list):
         for index, item in enumerate(value):
             _validate_json_value(item, f"{label}[{index}]")
     elif isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str):
-                raise SciverseParameterError(f"{label} object keys must be strings")
+                raise SciverseParameterError(source_message('{0} object keys must be strings', label))
             _validate_json_value(item, f"{label}.{key}")
     elif not isinstance(value, (str, int, float, bool)):
-        raise SciverseParameterError(f"{label} must be JSON-compatible")
+        raise SciverseParameterError(source_message('{0} must be JSON-compatible', label))
 
 
 def normalize_sciverse_filters(filters: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -132,19 +133,19 @@ def normalize_sciverse_filters(filters: list[dict[str, Any]] | None) -> list[dic
     if filters is None:
         return []
     if not isinstance(filters, list):
-        raise SciverseParameterError("--filters-advanced must be a JSON array")
+        raise SciverseParameterError(source_message('--filters-advanced must be a JSON array'))
 
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(filters):
         label = f"--filters-advanced[{index}]"
         if not isinstance(item, dict):
-            raise SciverseParameterError(f"{label} must be a JSON object")
+            raise SciverseParameterError(source_message('{0} must be a JSON object', label))
         unexpected = set(item) - {"field", "operator", "op", "value"}
         if unexpected:
-            raise SciverseParameterError(f"{label} has unsupported keys: {', '.join(sorted(unexpected))}")
+            raise SciverseParameterError(source_message('{0} has unsupported keys: {1}', label, ', '.join(sorted(unexpected))))
         field = _non_empty_text(item.get("field"), f"{label}.field")
         if "value" not in item:
-            raise SciverseParameterError(f"{label}.value is required")
+            raise SciverseParameterError(source_message('{0}.value is required', label))
         value = item["value"]
         _validate_json_value(value, f"{label}.value")
 
@@ -154,10 +155,10 @@ def normalize_sciverse_filters(filters: list[dict[str, Any]] | None) -> list[dic
         if "op" in item:
             legacy_operator = _normalize_filter_operator(item["op"], f"{label}.op")
             if "operator" in item and legacy_operator != operator:
-                raise SciverseParameterError(f"{label}.operator conflicts with legacy {label}.op")
+                raise SciverseParameterError(source_message('{0}.operator conflicts with legacy {1}.op', label, label))
             operator = legacy_operator
         if operator in {"FILTER_OP_IN", "FILTER_OP_NIN"} and (not isinstance(value, list) or not value):
-            raise SciverseParameterError(f"{label}.value must be a non-empty array for {operator}")
+            raise SciverseParameterError(source_message('{0}.value must be a non-empty array for {1}', label, operator))
 
         normalized.append({"field": field, "operator": operator, "value": value})
     return normalized
@@ -168,16 +169,16 @@ def normalize_sciverse_sort(sort: list[dict[str, Any]] | None) -> list[dict[str,
     if sort is None:
         return []
     if not isinstance(sort, list):
-        raise SciverseParameterError("--sort-advanced must be a JSON array")
+        raise SciverseParameterError(source_message('--sort-advanced must be a JSON array'))
 
     normalized: list[dict[str, Any]] = []
     for index, item in enumerate(sort):
         label = f"--sort-advanced[{index}]"
         if not isinstance(item, dict):
-            raise SciverseParameterError(f"{label} must be a JSON object")
+            raise SciverseParameterError(source_message('{0} must be a JSON object', label))
         unexpected = set(item) - {"field", "order"}
         if unexpected:
-            raise SciverseParameterError(f"{label} has unsupported keys: {', '.join(sorted(unexpected))}")
+            raise SciverseParameterError(source_message('{0} has unsupported keys: {1}', label, ', '.join(sorted(unexpected))))
         field = _non_empty_text(item.get("field"), f"{label}.field")
         order = "SORT_ORDER_DESC" if "order" not in item else _normalize_sort_order(item["order"], f"{label}.order")
         normalized.append({"field": field, "order": order})
@@ -186,36 +187,36 @@ def normalize_sciverse_sort(sort: list[dict[str, Any]] | None) -> list[dict[str,
 
 def _normalize_positive_int(value: Any, label: str, maximum: int | None = None) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise SciverseParameterError(f"{label} must be >= 1, got {value}")
+        raise SciverseParameterError(source_message('{0} must be >= 1, got {1}', label, value))
     if maximum is not None and value > maximum:
-        raise SciverseParameterError(f"{label} must be between 1 and {maximum}, got {value}")
+        raise SciverseParameterError(source_message('{0} must be between 1 and {1}, got {2}', label, maximum, value))
     return value
 
 
 def _normalize_sort_by_year(value: str | None) -> str:
     if value is not None and not isinstance(value, str):
-        raise SciverseParameterError("sort_by_year must be a string")
+        raise SciverseParameterError(source_message('sort_by_year must be a string'))
     text = (value or "none").strip().lower()
     if text not in {"asc", "desc", "none"}:
-        raise SciverseParameterError("sort_by_year must be one of asc, desc, none")
+        raise SciverseParameterError(source_message('sort_by_year must be one of asc, desc, none'))
     return text
 
 
 def _normalize_freshness_boost(value: str | None) -> str:
     if value is not None and not isinstance(value, str):
-        raise SciverseParameterError("freshness_boost must be a string")
+        raise SciverseParameterError(source_message('freshness_boost must be a string'))
     boost = (value or "NONE").strip().upper()
     if boost not in {"NONE", "MILD", "STRONG"}:
-        raise SciverseParameterError("freshness_boost must be one of NONE, MILD, STRONG")
+        raise SciverseParameterError(source_message('freshness_boost must be one of NONE, MILD, STRONG'))
     return boost
 
 
 def _validate_sciverse_papers_collection(collection: str | None, *, command: str) -> None:
     if collection is not None and not isinstance(collection, str):
-        raise SciverseParameterError("collection must be a string")
+        raise SciverseParameterError(source_message('collection must be a string'))
     if (collection or "papers").strip().lower() != "papers":
         raise SciverseParameterError(
-            f"{command} currently supports collection=papers only; the current Sciverse OpenAPI has no collection selector"
+            source_message('{0} currently supports collection=papers only; the current Sciverse OpenAPI has no collection selector', command)
         )
 
 
@@ -228,9 +229,9 @@ def normalize_sciverse_catalog_params(
     """Validate the legacy catalog selector without emitting it upstream."""
     _validate_sciverse_papers_collection(collection, command="sciverse-catalog")
     if not isinstance(include_sample_values, bool):
-        raise SciverseParameterError("include_sample_values must be a boolean")
+        raise SciverseParameterError(source_message('include_sample_values must be a boolean'))
     if not isinstance(include_field_stats, bool):
-        raise SciverseParameterError("include_field_stats must be a boolean")
+        raise SciverseParameterError(source_message('include_field_stats must be a boolean'))
     return {
         "include_sample_values": include_sample_values,
         "include_field_stats": include_field_stats,
@@ -244,7 +245,7 @@ def _merge_query_parts(*values: str | None) -> str:
         if value is None:
             continue
         if not isinstance(value, str):
-            raise SciverseParameterError("query, title_contains, and abstract_contains must be strings")
+            raise SciverseParameterError(source_message('query, title_contains, and abstract_contains must be strings'))
         text = value.strip()
         key = text.casefold()
         if text and key not in seen:
@@ -269,9 +270,9 @@ def normalize_sciverse_meta_search_payload(
     normalized_page = _normalize_positive_int(page, "page")
     normalized_page_size = _normalize_positive_int(page_size, "page_size", 200)
     if normalized_page * normalized_page_size > 10000:
-        raise SciverseParameterError("page * page_size must not exceed 10000")
+        raise SciverseParameterError(source_message('page * page_size must not exceed 10000'))
     if effective_query and normalized_sort:
-        raise SciverseParameterError("Sciverse /meta-search does not allow query together with sort")
+        raise SciverseParameterError(source_message('Sciverse /meta-search does not allow query together with sort'))
     boost = _normalize_freshness_boost(freshness_boost)
     return {
         "query": effective_query,
@@ -304,11 +305,11 @@ def build_sciverse_meta_search_payload(
     """Translate the established CLI conveniences into the current wire schema."""
     _validate_sciverse_papers_collection(collection, command="sciverse-search")
     if year_from is not None and (isinstance(year_from, bool) or not isinstance(year_from, int)):
-        raise SciverseParameterError("year_from must be an integer")
+        raise SciverseParameterError(source_message('year_from must be an integer'))
     if year_to is not None and (isinstance(year_to, bool) or not isinstance(year_to, int)):
-        raise SciverseParameterError("year_to must be an integer")
+        raise SciverseParameterError(source_message('year_to must be an integer'))
     if year_from is not None and year_to is not None and year_from > year_to:
-        raise SciverseParameterError("year_from must be less than or equal to year_to")
+        raise SciverseParameterError(source_message('year_from must be less than or equal to year_to'))
 
     filters: list[dict[str, Any]] = []
     author_values = split_sciverse_csv(authors)
@@ -366,21 +367,21 @@ def build_sciverse_meta_search_payload(
 def normalize_sciverse_retrieval(retrieval: str | None = "", legacy_mode: str | None = None) -> tuple[str, str]:
     """Resolve the modern retrieval option and the deprecated --mode bridge."""
     if retrieval is not None and not isinstance(retrieval, str):
-        raise SciverseParameterError("retrieval must be a string")
+        raise SciverseParameterError(source_message('retrieval must be a string'))
     if legacy_mode is not None and not isinstance(legacy_mode, str):
-        raise SciverseParameterError("mode must be a string")
+        raise SciverseParameterError(source_message('mode must be a string'))
     explicit = (retrieval or "").strip().lower()
     if explicit and explicit not in SCIVERSE_RETRIEVALS:
         allowed = ", ".join(sorted(SCIVERSE_RETRIEVALS))
-        raise SciverseParameterError(f"retrieval must be one of {allowed}")
+        raise SciverseParameterError(source_message('retrieval must be one of {0}', allowed))
     legacy = (legacy_mode or "").strip().lower()
     warning = ""
     if legacy:
         if legacy not in LEGACY_SCIVERSE_MODES:
             allowed = ", ".join(sorted(LEGACY_SCIVERSE_MODES))
-            raise SciverseParameterError(f"mode must be one of {allowed}")
+            raise SciverseParameterError(source_message('mode must be one of {0}', allowed))
         if explicit and explicit != "hybrid":
-            raise SciverseParameterError("--mode maps to --retrieval hybrid and conflicts with the explicit --retrieval value")
+            raise SciverseParameterError(source_message('--mode maps to --retrieval hybrid and conflicts with the explicit --retrieval value'))
         explicit = "hybrid"
         warning = "--mode is deprecated and maps to --retrieval hybrid; use --retrieval hybrid|milvus|es."
     return explicit or "hybrid", warning
@@ -396,7 +397,7 @@ def normalize_sciverse_semantic_payload(
     """Validate an AgenticSearchRequest using the current public enum values."""
     normalized_query = _non_empty_text(query, "query")
     if len(normalized_query) > 4096:
-        raise SciverseParameterError("query must be at most 4096 characters")
+        raise SciverseParameterError(source_message('query must be at most 4096 characters'))
     normalized_top_k = _normalize_positive_int(top_k, "top_k", 100)
     normalized_retrieval, _ = normalize_sciverse_retrieval(retrieval)
     normalized_source_types: list[str] = []
@@ -404,7 +405,7 @@ def normalize_sciverse_semantic_payload(
         value = source_type.lower()
         if value not in SCIVERSE_SOURCE_TYPES:
             allowed = ", ".join(sorted(SCIVERSE_SOURCE_TYPES))
-            raise SciverseParameterError(f"source_types values must be one of {allowed}")
+            raise SciverseParameterError(source_message('source_types values must be one of {0}', allowed))
         if value not in normalized_source_types:
             normalized_source_types.append(value)
     return {
@@ -427,7 +428,7 @@ def normalize_sciverse_relations_payload(
     normalized_relation = _non_empty_text(relation, "relation").upper()
     if normalized_relation not in SCIVERSE_RELATIONS:
         allowed = ", ".join(sorted(SCIVERSE_RELATIONS))
-        raise SciverseParameterError(f"relation must be one of {allowed}")
+        raise SciverseParameterError(source_message('relation must be one of {0}', allowed))
     return {
         "unique_id": normalized_unique_id,
         "relation": normalized_relation,

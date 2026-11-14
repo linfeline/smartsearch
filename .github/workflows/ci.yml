@@ -48,30 +48,30 @@ jobs:
           cache: npm
 
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Install npm package
-        run: npm ci
+      - name: Install source test dependencies
+        run: python -m pip install --disable-pip-version-check -e ".[dev]"
 
-      - name: Test package
-        run: npm test
+      - name: Test Python source and npm launcher
+        run: |
+          python -m pytest
+          npm test
 
       - name: Run source regression
-        run: node npm/bin/smart-search.js regression
+        run: python -m smart_search.cli regression
 
       - name: Run mock smoke
-        run: node npm/bin/smart-search.js smoke --mock --format json
+        run: python -m smart_search.cli smoke --mock --format json
 
       - name: Check skill parity
         run: npm run check:skill-parity
 
       - name: Check package contents
         run: npm run pack:dry
-
-      - name: Smoke test packed install
-        run: npm run smoke:tarball
 
       - name: Check committed diff whitespace
         shell: bash
@@ -81,3 +81,10 @@ jobs:
           else
             git diff-tree --check --root -r --no-commit-id HEAD
           fi
+
+  binaries:
+    uses: ./.github/workflows/npm-binaries.yml
+    with:
+      ref: ${{ github.sha }}
+      # Exercise the beta release path, including Python metadata normalization.
+      version: "0.0.0-beta.1"

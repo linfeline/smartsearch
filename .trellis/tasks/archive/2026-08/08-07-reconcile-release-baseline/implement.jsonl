@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Preserve provider, fallback, optional-provider and packaged-skill contracts while resolving integration conflicts."}
-{"file":".trellis/tasks/08-07-stable-release-015/design.md","reason":"Use the approved branch topology and selective PR #21 integration decisions."}

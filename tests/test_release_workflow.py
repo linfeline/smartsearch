@@ -1,8 +1,11 @@
+import importlib.util
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,6 +14,33 @@ WORKFLOW = ROOT / ".github" / "workflows" / "publish-npm.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 TARBALL_SMOKE = ROOT / "npm" / "scripts" / "smoke-packed-install.js"
 SKILL_PARITY_CHECK = ROOT / "npm" / "scripts" / "check-skill-parity.js"
+
+
+@pytest.mark.parametrize("declared,installed,error", [
+    ("0.1.24", "0.1.24", "desktop entry is not available"),
+    ("0.1.24-alpha.1", "0.1.24a1", "desktop entry is not available"),
+    ("0.1.24-beta.2", "0.1.24b2", "desktop entry is not available"),
+    ("0.1.24-rc.3", "0.1.24rc3", "desktop entry is not available"),
+    ("0.1.24-dev.4", "0.1.24.dev4", "desktop entry is not available"),
+    ("0.1.24-beta.2", "0.1.24b1", "metadata is stale"),
+    ("0.1.24-beta.2", "0.1.24rc2", "metadata is stale"),
+    ("0.1.24-beta.2", "0.1.24", "metadata is stale"),
+    ("0.1.24-beta.2", "0.1.25b2", "metadata is stale"),
+    ("invalid", "0.1.24", "Invalid version"),
+    ("0.1.24", "invalid", "Invalid version"),
+])
+def test_backend_build_accepts_equivalent_versions_but_rejects_stale_metadata(tmp_path, monkeypatch, declared, installed, error):
+    spec = importlib.util.spec_from_file_location("build_backend", ROOT / "desktop/scripts/build_backend.py")
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nversion = "{declared}"\n', encoding="utf-8")
+    monkeypatch.setattr(backend, "REPOSITORY_ROOT", tmp_path)
+    monkeypatch.setattr(backend.importlib.metadata, "version", lambda _: installed)
+    monkeypatch.setattr(sys, "argv", ["build_backend.py", "--entry", "missing.py"])
+    # A missing entry stops accepted versions before PyInstaller or artifact writes.
+    with pytest.raises((RuntimeError, ValueError), match=error):
+        backend.main()
+    assert not (tmp_path / ".desktop-artifacts").exists()
 
 
 def read_reference_tree(skill_dir: Path) -> str:
@@ -169,13 +199,11 @@ def test_ci_workflow_is_no_publish_and_covers_the_release_runtime_matrix():
     assert len(matrix) == 3
 
     for command in [
-        "npm ci",
         "npm test",
-        "node npm/bin/smart-search.js regression",
-        "node npm/bin/smart-search.js smoke --mock --format json",
+        "python -m smart_search.cli regression",
+        "python -m smart_search.cli smoke --mock --format json",
         "npm run check:skill-parity",
         "npm run pack:dry",
-        "npm run smoke:tarball",
         "git diff --check HEAD^1 HEAD",
         "git diff-tree --check --root -r --no-commit-id HEAD",
     ]:
@@ -204,16 +232,16 @@ def test_release_version_metadata_and_tarball_support_are_synchronized():
         "regression",
         "smoke",
         "--mock",
-        "assertPackContents",
-        "src/smart_search/assets/skills/smart-search-cli/",
-        'path.extname(filePath) === ".py"',
+        "--ignore-scripts",
+        "PYTHONHOME",
+        "--desktop-backend",
     ]:
         assert marker in tarball_smoke
 
 
 def test_release_docs_explain_beta_lane_and_npm_immutability():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = (ROOT / "docs/guide/en/development.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "docs/guide/zh-CN/development.md").read_text(encoding="utf-8")
     public_contract = read_reference_tree(ROOT / "skills" / "smart-search-cli")
     packaged_contract = read_reference_tree(
         ROOT / "src" / "smart_search" / "assets" / "skills" / "smart-search-cli"
@@ -299,3 +327,32 @@ def test_v015_release_notes_cover_beta_and_stable_lanes():
         assert marker in beta_notes
     for marker in ["v0.1.15", "npm `latest`", "Context7", "AnySearch", "Validation"]:
         assert marker in stable_notes
+
+
+def test_native_release_requires_all_platforms_and_excludes_pr_secrets():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/desktop-build.yml").read_text())
+    release = workflow["jobs"]["release-assets"]
+    assert release["needs"] == ["windows", "macos", "macos-universal-intel"]
+    assert "github.event_name == 'workflow_dispatch'" in release["if"]
+    assert "inputs.release_tag != ''" in release["if"]
+    assert "!inputs.windows_only" in release["if"]
+    assert "!inputs.windows_only" in workflow["jobs"]["macos"]["if"]
+    events = read_workflow_events((ROOT / ".github/workflows/desktop-build.yml").read_text())
+    assert events["workflow_dispatch"]["inputs"]["windows_only"]["default"] == "false"
+    assert events["workflow_dispatch"]["inputs"]["sign_macos_updates"]["default"] == "false"
+    for job in (workflow["jobs"]["windows"], workflow["jobs"]["macos"], workflow["jobs"]["macos-universal"]):
+        for step in job["steps"]:
+            if "secrets." in str(step.get("env", {})):
+                assert "github.event_name == 'workflow_dispatch'" in step["if"]
+    mac_steps = {step.get("name"): step for step in workflow["jobs"]["macos"]["steps"]}
+    signing = mac_steps["Prepare explicitly configured Sparkle release signing"]
+    assert "inputs.sign_macos_updates || inputs.release_tag != ''" in signing["if"]
+    assert 'test "$SMART_SEARCH_SPARKLE_PUBLIC_KEY" = "$expected"' in signing["run"]
+    assert signing["if"] in mac_steps["Remove only the temporary release key"]["if"]
+    windows_steps = {step.get("name"): step for step in workflow["jobs"]["windows"]["steps"]}
+    assert "Sparkle signing requires macOS jobs" in windows_steps["Validate release source before loading signing keys"]["run"]
+    release_steps = {step.get("name"): step for step in release["steps"]}
+    script = release_steps["Attach verified packages before exposing update feeds"]["run"]
+    assert script.index('"${packages[@]}"') < script.index('"${feeds[@]}"')
+    assert "set -euo pipefail" in script
+    assert "desktop:release:validate" in release_steps["Verify every feed reference and create checksums"]["run"]

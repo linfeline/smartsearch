@@ -1,3 +1,4 @@
+from ..i18n import source_message
 import json
 import time
 from typing import Any
@@ -45,7 +46,7 @@ def _config_error(tool: str, **extra: Any) -> str:
         "provider": "sciverse",
         "tool": tool,
         "error_type": "config_error",
-        "error": "SCIVERSE_API_TOKEN is not configured",
+        "error": source_message('SCIVERSE_API_TOKEN is not configured'),
         "elapsed_ms": 0,
     }
     payload.update({key: value for key, value in extra.items() if value})
@@ -67,29 +68,29 @@ def _parameter_error(tool: str, message: str, **extra: Any) -> str:
 
 def _expect_response_object(data: Any, tool: str) -> dict[str, Any]:
     if not isinstance(data, dict):
-        raise SciverseSchemaError(f"{tool} response must be a JSON object")
+        raise SciverseSchemaError(source_message('{0} response must be a JSON object', tool))
     return data
 
 
 def _required_list(data: dict[str, Any], key: str, tool: str, *, item_objects: bool = False) -> list[Any]:
     if key not in data:
-        raise SciverseSchemaError(f"{tool} response field {key!r} is required")
+        raise SciverseSchemaError(source_message('{0} response field {1!r} is required', tool, key))
     value = data[key]
     if not isinstance(value, list):
-        raise SciverseSchemaError(f"{tool} response field {key!r} must be an array")
+        raise SciverseSchemaError(source_message('{0} response field {1!r} must be an array', tool, key))
     if item_objects:
         for index, item in enumerate(value):
             if not isinstance(item, dict):
-                raise SciverseSchemaError(f"{tool} response field {key!r} item {index} must be an object")
+                raise SciverseSchemaError(source_message('{0} response field {1!r} item {2} must be an object', tool, key, index))
     return value
 
 
 def _required_text(data: dict[str, Any], key: str, tool: str) -> str:
     if key not in data:
-        raise SciverseSchemaError(f"{tool} response field {key!r} is required")
+        raise SciverseSchemaError(source_message('{0} response field {1!r} is required', tool, key))
     value = data[key]
     if not isinstance(value, str):
-        raise SciverseSchemaError(f"{tool} response field {key!r} must be a string")
+        raise SciverseSchemaError(source_message('{0} response field {1!r} must be a string', tool, key))
     return value
 
 

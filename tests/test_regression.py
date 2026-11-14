@@ -98,7 +98,7 @@ def test_deep_research_skill_contract_public_and_packaged_assets_match():
         "tempfile.gettempdir()/smart-search-evidence",
         "mock-full plus live-limited",
         "public planner entrypoint",
-        "public live executor entrypoint",
+        "public live executor",
         "not an executor",
         "does not change default `smart-search search`",
         "does not depend on an MCP session",
@@ -106,11 +106,11 @@ def test_deep_research_skill_contract_public_and_packaged_assets_match():
         "provider advantage routing",
         "smart-search route",
         "Intent Routing Diagnostics",
-        "SMART_SEARCH_INTENT_ROUTER=hybrid|rules|off",
-        "INTENT_EMBEDDING_API_URL",
-        "INTENT_CLASSIFIER_API_URL",
+        "SMART_SEARCH_INTENT_ROUTER=jev|local",
+        "INTENT_EMBEDDING_*",
+        "INTENT_CLASSIFIER_*",
         "required_capabilities",
-        "Classifier output cannot select providers",
+        "Jev does not generate arbitrary queries or tool calls",
     ]
     for marker in required_markers:
         assert marker in public_text
@@ -123,8 +123,8 @@ def test_deep_research_cli_contract_documents_plan_and_smoke_matrix():
     required_markers = [
         "Deep Research Skill Contract",
         "`smart-search deep` is the public offline planner command",
-        "`smart-search research` is the public live executor command",
-        "must not change default `smart-search search` behavior",
+        "`smart-search research` is the public live executor",
+        "does not change default `smart-search search` behavior",
         "`mode`: always `deep_research`",
         "`query_mode`: always `deep`",
         "`question`: the user's research question",
@@ -145,7 +145,7 @@ def test_deep_research_cli_contract_documents_plan_and_smoke_matrix():
         "fixed topic recipe ids are not required schema",
         "Mock-full coverage should cover trigger phrases",
         "research provider advantage routing",
-        "`research --fallback auto` permits same-capability fallback",
+        "`research --fallback auto` permits local outage fallback and follow-up searches",
         "Live-limited coverage should run `doctor`, one broad `search`, one `exa-search`, and one `fetch`",
         "`smart-search skills status --targets codex,claude,cursor,hermes --format json`",
         "`smart-search skills update --targets codex,claude,cursor,hermes --format json`",
@@ -163,10 +163,10 @@ def test_deep_research_cli_contract_documents_plan_and_smoke_matrix():
         "Route diagnostic output includes",
         "`intent_router_mode`",
         "`required_capabilities`",
-        "`SMART_SEARCH_INTENT_ROUTER` accepts `hybrid`, `rules`, and `off`",
-        "`INTENT_EMBEDDING_API_URL`",
-        "`INTENT_CLASSIFIER_API_URL`",
-        "`INTENT_ROUTER_TIMEOUT_SECONDS` defaults to `8`",
+        "`hybrid` maps to `jev`",
+        "`INTENT_EMBEDDING_*`",
+        "`INTENT_CLASSIFIER_*`",
+        "`INTENT_ROUTER_TIMEOUT_SECONDS` keys stay stored",
         "`deep` remains an offline planner",
     ]
     for marker in required_markers:
@@ -183,21 +183,20 @@ def test_search_timeout_retry_policy_is_distributable():
     skill_markers = [
         "Timeout Retry Policy",
         "error_type: \"timeout\"",
-        "Retry up to 3 total attempts with `--timeout 180`",
-        "`--extra-sources 1` during retry attempts",
-        "`--timeout` only for an explicit one-call override",
-        "Do not wrap `smart-search` in a shell-level `timeout` command",
-        "Do not rely on `SMART_SEARCH_RETRY_*` settings",
-        "fall back to source-first evidence",
+        "Retry the same search at most once, adding `--extra-sources 1`",
+        "inspect `timeout_phase` and `provider_attempts` first",
+        "`--timeout` overrides one call",
+        "command execution timeout at least 30 seconds longer than the smart-search total budget",
+        "switch to source-first evidence",
         "Run `exa-search` with the original query",
         "`fetch` the top 1-2 relevant URLs",
         "source_mode: \"fallback\"",
     ]
     contract_markers = [
         "Agent timeout handling contract",
-        "`smart-search search ... --timeout 180 --extra-sources 1 --format json --output PATH`",
-        "not a shell-level `timeout` wrapper",
-        "`SMART_SEARCH_RETRY_*` settings are not the contract",
+        "`smart-search search ... --timeout 300 --extra-sources 1 --format json --output PATH`",
+        "retry the same search at most once with `--extra-sources 1`",
+        "command execution timeout at least 30 seconds above the smart-search total budget",
         "switch to source-first fallback",
         "`exa-search --include-domains`",
         "`source_mode: \"fallback\"`",
@@ -211,9 +210,13 @@ def test_search_timeout_retry_policy_is_distributable():
         assert marker in packaged_contract
 
 
-def test_deep_research_readme_documents_capability_orchestration():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+def _guide_text(language):
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted((ROOT / "docs/guide" / language).glob("*.md")))
+
+
+def test_deep_research_guide_documents_capability_orchestration():
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     english_markers = [
         "Deep Research is not a fixed topic recipe system",
         "smart-search research",
@@ -265,12 +268,12 @@ def test_deep_research_readme_documents_capability_orchestration():
 
 
 def test_readme_language_split_and_provider_links_are_documented():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     package_json = (ROOT / "package.json").read_text(encoding="utf-8")
 
-    assert "[简体中文](README.zh-CN.md) | English" in readme
-    assert "简体中文 | [English](README.md)" in readme_zh
+    assert "[简体中文](README.zh-CN.md) | English" in (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "简体中文 | [English](README.md)" in (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
     assert "## 中文" not in readme
     assert "## English" not in readme
     assert "README.zh-CN.md" in package_json
@@ -302,8 +305,8 @@ def test_deep_research_shared_skill_files_are_synchronized():
 
 
 def test_opencode_skill_path_contract_is_synchronized():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
     packaged_contract = _read_reference_tree(PACKAGED_SKILL_DIR)
     required_markers = [
@@ -327,8 +330,8 @@ def test_opencode_skill_path_contract_is_synchronized():
 
 
 def test_zhipu_setup_contract_public_and_packaged_assets_match():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
     packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
     public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
@@ -412,8 +415,8 @@ def test_doubao_setup_contract_public_and_packaged_assets_match():
 
 
 def test_jina_and_zhipu_mcp_contract_public_and_packaged_assets_match():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
     packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
     public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
@@ -471,9 +474,8 @@ def test_jina_and_zhipu_mcp_contract_public_and_packaged_assets_match():
 
 
 def test_streaming_and_anysearch_contract_public_and_packaged_assets_match():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
-    provider_contract = (ROOT / ".trellis/spec/backend/provider-capability-contract.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
     packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
     public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
@@ -514,19 +516,14 @@ def test_streaming_and_anysearch_contract_public_and_packaged_assets_match():
         assert marker in public_contract
         assert marker in packaged_contract
 
-    provider_contract_markers = [
-        "SCIVERSE_API_TOKEN",
-        "sciverse-catalog",
-        "sciverse-relations",
-        "--retrieval",
-        "deprecated bridge",
-        "no `collection` selector",
-        "explicit-only",
-        "Do not insert Sciverse into `docs_search`",
-        "not required by and must not satisfy the `standard` minimum",
+    sciverse_boundary_markers = [
+        "explicit experimental academic search only",
+        "do not use Sciverse as `docs_search`",
+        "do not insert Sciverse into default Deep Research fallback",
     ]
-    for marker in provider_contract_markers:
-        assert marker in provider_contract
+    for marker in sciverse_boundary_markers:
+        assert marker in public_text
+        assert marker in packaged_text
 
     zh_required_markers = [
         "OPENAI_COMPATIBLE_STREAM",
@@ -555,8 +552,8 @@ def test_streaming_and_anysearch_contract_public_and_packaged_assets_match():
 def test_openai_compatible_fallback_is_fail_over_not_time_slice():
     public_contract = _read_reference_tree(PUBLIC_SKILL_DIR)
     packaged_contract = _read_reference_tree(PACKAGED_SKILL_DIR)
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     markers = [
         "fail-over after a hard primary-model failure, not a time slice",
         "remaining shared main-search budget",
@@ -569,9 +566,8 @@ def test_openai_compatible_fallback_is_fail_over_not_time_slice():
 
 
 def test_openai_compatible_responses_mode_contract_is_documented_and_packaged():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
-    provider_contract = (ROOT / ".trellis/spec/backend/provider-capability-contract.md").read_text(encoding="utf-8")
+    readme = _guide_text("en")
+    readme_zh = _guide_text("zh-CN")
     public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
     packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
 
@@ -584,11 +580,9 @@ def test_openai_compatible_responses_mode_contract_is_documented_and_packaged():
     ]:
         assert marker in public_text
         assert marker in packaged_text
-        assert marker in provider_contract
 
     assert "does not promise `/responses` support" in public_text
     assert "does not promise `/responses` support" in packaged_text
-    assert "official protocol subset plus named relay acceptance" in provider_contract
 
     assert "OPENAI_COMPATIBLE_API_MODE=responses" in readme
     assert "official `model` + `instructions`/`input` request subset" in readme

@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Follow the established provider error, fallback, configuration and smoke contracts."}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Respect repository error-handling guidance while centralizing exception classification."}

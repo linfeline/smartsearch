@@ -1,10 +1,12 @@
 import asyncio
 import httpx
+import json
 import pytest
 import time
 
 from smart_search.providers.openai_compatible import OpenAICompatibleSearchProvider, reset_openai_compatible_breakers
 from smart_search.provider_errors import ProviderCallError
+from smart_search.sources import split_answer_and_sources
 
 
 class DummyResponse:
@@ -88,7 +90,7 @@ def test_openai_compatible_endpoint_normalizes_known_completion_suffixes(api_url
 
 
 @pytest.mark.asyncio
-async def test_responses_mode_fetch_describe_and_rank_use_non_stream_responses_payloads(monkeypatch):
+async def test_responses_fetch_respects_stream_while_describe_and_rank_stay_non_stream(monkeypatch):
     provider = OpenAICompatibleSearchProvider(
         "https://api.example.com/v1",
         "test-key",
@@ -108,14 +110,61 @@ async def test_responses_mode_fetch_describe_and_rank_use_non_stream_responses_p
         return "fetched content"
 
     monkeypatch.setattr(provider, "_execute_completion_with_retry", fake_execute)
+    monkeypatch.setattr(provider, "_execute_stream_with_retry", fake_execute)
 
     assert await provider.fetch("https://example.com/page") == "fetched content"
     assert (await provider.describe_url("https://example.com"))["title"] == "Example"
     assert await provider.rank_sources("query", "1. Source", 1) == [1]
     assert len(payloads) == 3
-    assert all(payload["stream"] is False for payload in payloads)
+    assert [payload["stream"] for payload in payloads] == [True, False, False]
     assert all("instructions" in payload and "input" in payload for payload in payloads)
     assert all("messages" not in payload and "tools" not in payload for payload in payloads)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [["web_search"], ["web_search_preview"]])
+async def test_responses_tools_ride_on_search_only(monkeypatch, tools):
+    provider = OpenAICompatibleSearchProvider(
+        "https://api.openai.com/v1", "test-key", "gpt-6.1-sol", api_mode="responses", tools=tools,
+    )
+    payloads = {}
+
+    def capture(name):
+        async def fake(headers, payload, ctx=None):
+            payloads.setdefault(name, payload)
+            return "1" if name == "rank" else "Title: T\nExtracts: E" if name == "describe" else "answer"
+        return fake
+
+    monkeypatch.setattr(provider, "_execute_with_transport_fallback", capture("search"))
+    await provider.search("latest python release")
+    monkeypatch.setattr(provider, "_execute_with_transport_fallback", capture("fetch"))
+    await provider.fetch("https://example.com")
+    monkeypatch.setattr(provider, "_execute_with_transport_fallback", capture("synthesize"))
+    await provider.synthesize("q", [])
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", capture("describe"))
+    await provider.describe_url("https://example.com")
+    monkeypatch.setattr(provider, "_execute_completion_with_retry", capture("rank"))
+    await provider.rank_sources("q", "1. a", 1)
+
+    assert payloads["search"]["tools"] == [{"type": tool} for tool in tools]
+    assert all("tools" not in payloads[name] for name in ("fetch", "synthesize", "describe", "rank"))
+
+
+@pytest.mark.asyncio
+async def test_chat_completions_never_sends_tools(monkeypatch):
+    provider = OpenAICompatibleSearchProvider(
+        "https://api.example.com/v1", "test-key", "gpt-5-search-api", api_mode="chat-completions", tools=["web_search"],
+    )
+    captured = {}
+
+    async def fake(headers, payload, ctx=None):
+        captured["payload"] = payload
+        return "answer"
+
+    monkeypatch.setattr(provider, "_execute_with_transport_fallback", fake)
+    await provider.search("latest python release")
+
+    assert "tools" not in captured["payload"] and "messages" in captured["payload"]
 
 
 @pytest.mark.asyncio
@@ -703,6 +752,54 @@ async def test_parse_completion_response_appends_top_level_citations():
     assert "https://example.com/top" in result
 
 
+# OpenAI's Chat Completions search models (gpt-5-search-api) nest each citation under "url_citation".
+CHAT_ANSWER = (
+    "Python 3.15.2 is the latest stable release. ([python.org](https://www.python.org/getit/?utm_source=openai))\n\n"
+    "It was released on October 25, 2026. ([python.org](https://www.python.org/getit/?utm_source=openai))"
+)
+CHAT_ANNOTATION = {
+    "type": "url_citation",
+    "url_citation": {
+        "start_index": 45,
+        "end_index": 104,
+        "title": "Download Python | Python.org",
+        "url": "https://www.python.org/getit/?utm_source=openai",
+    },
+}
+CHAT_SOURCES = [{"url": "https://www.python.org/getit/?utm_source=openai", "title": "Download Python | Python.org"}]
+
+
+@pytest.mark.asyncio
+async def test_parse_completion_response_keeps_nested_chat_annotations():
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "gpt-5-search-api")
+    data = {"choices": [{"message": {"role": "assistant", "content": CHAT_ANSWER, "annotations": [CHAT_ANNOTATION]}}]}
+
+    result = await provider._parse_completion_response(DummyResponse(text=json.dumps(data), json_data=data))
+
+    assert split_answer_and_sources(result) == (CHAT_ANSWER, CHAT_SOURCES)
+
+
+@pytest.mark.asyncio
+async def test_parse_streaming_response_keeps_chat_delta_annotations():
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "gpt-5-search-api")
+    first, second = CHAT_ANSWER[:50], CHAT_ANSWER[50:]
+
+    class StreamResponse:
+        async def aiter_lines(self):
+            for chunk in (
+                {"choices": [{"delta": {"role": "assistant", "content": "", "refusal": None}}]},
+                {"choices": [{"delta": {"content": first}}]},
+                {"choices": [{"delta": {"annotations": [CHAT_ANNOTATION, CHAT_ANNOTATION]}}]},
+                {"choices": [{"delta": {"content": second}}]},
+            ):
+                yield "data: " + json.dumps(chunk)
+            yield "data: [DONE]"
+
+    result = await provider._parse_streaming_response(StreamResponse())
+
+    assert split_answer_and_sources(result) == (CHAT_ANSWER, CHAT_SOURCES)
+
+
 @pytest.mark.asyncio
 async def test_parse_completion_response_falls_back_to_sse():
     """验证 JSON 解析失败时 fallback 到 SSE 文本解析"""
@@ -825,3 +922,96 @@ async def test_ssl_warning_emitted_once(monkeypatch, caplog):
 
     warning_count = sum(1 for r in caplog.records if "SSL_VERIFY=false" in r.message)
     assert warning_count == 1
+
+
+def test_request_read_timeout_follows_the_shared_deadline(monkeypatch):
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model")
+    provider.set_search_deadline(time.monotonic() + 280.0)
+
+    timeout = provider._request_timeout()
+
+    # The shared main_search deadline is the only ceiling; a slow reasoning model
+    # must not be cut off by a second, smaller read cap.
+    assert timeout.read > 240.0
+    assert timeout.connect == 6.0
+    assert timeout.write == 10.0
+
+
+def test_standalone_request_read_timeout_uses_the_configured_budget(monkeypatch):
+    from smart_search.providers.openai_compatible import config
+
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model")
+    monkeypatch.setenv("SMART_SEARCH_TIMEOUT_SECONDS", "450")
+
+    assert provider._request_timeout().read == 450.0
+    assert config.search_timeout == 450.0
+
+    monkeypatch.setenv("SMART_SEARCH_TIMEOUT_SECONDS", "not-a-number")
+
+    # An invalid saved budget must not turn into a transport error here.
+    assert provider._request_timeout().read == 300.0
+
+
+def test_short_deadline_still_shrinks_every_timeout_component():
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model")
+    provider.set_search_deadline(time.monotonic() + 2.0)
+
+    timeout = provider._request_timeout()
+
+    assert timeout.read <= 2.0
+    assert timeout.connect <= 2.0
+    assert timeout.write <= 2.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("delay,expected_requests", [(0.1, 1), (0, 4)])
+async def test_openai_retry_stops_after_slow_failure(monkeypatch, stream, delay, expected_requests):
+    import smart_search.providers.openai_compatible as provider_mod
+
+    monkeypatch.setattr(provider_mod, "SLOW_FAILURE_SECONDS", 0.05)
+    monkeypatch.setenv("SMART_SEARCH_RETRY_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("SMART_SEARCH_RETRY_MULTIPLIER", "0")
+    requests = []
+    original_client = httpx.AsyncClient
+
+    async def handler(request):
+        requests.append(request)
+        if delay:
+            await asyncio.sleep(delay)
+        return httpx.Response(503)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "test-model", stream=stream)
+    execute = provider._execute_stream_with_retry if stream else provider._execute_completion_with_retry
+    with pytest.raises(httpx.HTTPStatusError):
+        await execute({}, {"stream": stream})
+
+    assert len(requests) == expected_requests
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_done_returns_without_eof(monkeypatch):
+    import smart_search.providers.openai_compatible as provider_mod
+
+    monkeypatch.setattr(provider_mod, "_STREAM_BREAKERS", {})
+    never = asyncio.Event()
+
+    class OpenEndedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
+            yield b'data: {"choices":[{"delta":{"content":" world"}}]}\n\n'
+            yield b'data: [DONE]\n\n'
+            await never.wait()
+
+    async def handler(request):
+        return httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=OpenEndedStream())
+
+    original_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original_client(transport=httpx.MockTransport(handler), **kwargs))
+    provider = OpenAICompatibleSearchProvider("https://api.example.com", "test-key", "done-test-model", stream=True)
+
+    result = await asyncio.wait_for(provider.search("query"), 2)
+
+    assert result == "Hello world"
+    assert [attempt["transport"] for attempt in provider.last_transport_attempts] == ["stream"]

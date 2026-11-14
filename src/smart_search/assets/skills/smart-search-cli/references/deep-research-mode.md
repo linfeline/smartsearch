@@ -28,16 +28,16 @@ Use Deep Research Mode when the user asks for `深度搜索`, `深度调研`, `�
 
 Do not select a fixed topic recipe. Market, product, technical docs, news, policy, claim-checking, and URL-first prompts are examples of user language, not schema modes. Deep Research must not require fixed topic recipe ids such as `current_market_research`, `product_comparison_research`, `technical_docs_research`, `news_or_policy_research`, `claim_verification_research`, or `url_first_research`; fixed topic recipe ids are not required schema.
 
-Deep Research does not change default `smart-search search` behavior and does not depend on an MCP session. It must not change default `smart-search search` behavior.
+Deep Research does not change default `smart-search search` behavior and does not depend on an MCP session.
 
 ## Offline Planner And Live Executor
 
 - `smart-search deep` is the public offline planner command and a public planner entrypoint, not an executor. It does not call providers, run `doctor`, or fetch pages by default.
-- `smart-search research` is the public live executor command and public live executor entrypoint. It executes plan -> discover -> fetch/read -> gap check -> evidence-only synthesis.
+- `smart-search research` is the public live executor. It uses the plan's question candidates, then selects and executes actions in a bounded loop with Jev or local routing; it does not execute the offline `steps[].command` list. The default returns evidence; optional model synthesis is controlled separately.
 - Before manual execution, run `smart-search deep "question" --format json` and use the returned `research_plan` as your planning artifact.
 - Use `smart-search research "question" --format json` when the user wants the CLI to run live Deep Research end to end instead of only planning.
 
-Default orchestration:
+Optional manual orchestration (use `research` directly for automatic execution):
 
 1. Run `smart-search doctor --format json` as preflight when configuration is uncertain.
 2. Call `smart-search deep "question" --format json` to create an offline `research_plan`.
@@ -47,7 +47,7 @@ Default orchestration:
 6. Use `fetch` on key URLs before making claim-level statements.
 7. Run `gap_check`: if an important claim lacks fetched evidence, fetch another source or mark the claim/source as unverified.
 
-Default evidence policy is `fetch_before_claim`: key claims in the final answer must be supported by fetched page text. Treat `primary_sources` and `extra_sources` as discovery candidates until the relevant URL has been fetched. Final answers should include fetched evidence, unverified candidate sources, and key commands used.
+Default evidence policy is `fetch_before_claim`: key claims in the final answer must be supported by fetched page text. Treat unread `sources` and model `primary_sources` as discovery candidates until fetched; `extra_sources` is an empty compatibility list. Final answers should include fetched evidence, unverified candidate sources, and key commands used.
 
 ## Planner Shape
 
@@ -145,13 +145,13 @@ Prefer PowerShell-safe quoted commands in generated plans because Windows users 
 
 ## Capability Boundaries
 
-- `search`: broad discovery and synthesis through `main_search`; use returned `routing_decision`, `provider_attempts`, `fallback_used`, and `source_warning` as orchestration signals, not as claim proof.
+- `search`: one selected retrieval channel; use returned `routing_decision`, `provider_attempts`, `fallback_used`, and `source_warning` as orchestration signals, not as claim proof.
 - `zhipu-search`: Chinese, domestic, current, policy/regulatory, announcement, and China-local source discovery.
 - `doubao-search`: ByteDance Doubao Search / Search Infinity for the same Chinese, domestic, current, and China-local source discovery.
 - `context7-library` and `context7-docs`: library, SDK, API, framework, and documentation intent. Prefer Context7 before Exa for docs/API questions.
 - `exa-search`: low-noise source discovery for official domains, papers, product pages, known domains, and trusted pages. Do not treat Exa as the universal second hop for every high-risk or verification task.
 - `exa-similar`: adjacent-source discovery when a known reliable URL is available.
-- `search --extra-sources N`: Tavily/Firecrawl horizontal candidate collection for breadth. Treat those candidates as discovery until fetched.
+- `search --extra-sources N`: result count for the single selected ordinary-search channel (maximum 20); it does not add channels.
 - `anysearch-domains` and `anysearch-search`: experimental vertical search. Inspect domains first, then search a selected domain; do not insert it into the default fallback chain.
 - `sciverse-catalog`, `sciverse-search`, `sciverse-semantic`, `sciverse-read`, and `sciverse-relations`: explicit experimental academic commands. Use them directly when the task needs Sciverse academic fields, semantic paper hits, document chunks, or citation/reference relations; do not insert Sciverse into default Deep Research fallback.
 - `fetch`: page-content evidence. Key claims require fetched page text under `fetch_before_claim`.
@@ -165,9 +165,9 @@ Use this form when the user wants the CLI to execute the live workflow directly:
 smart-search research "question" --budget deep --fallback auto --evidence-dir "<evidence-dir>" --format json --output "research.json"
 ```
 
-`research --fallback auto` permits same-capability fallback inside selected routes. `research --fallback off` tries only the first selected provider in each capability route and is for debugging or provider comparison. Dynamic routing may reorder providers only inside the same capability. Every attempt must record capability, provider, status, error type, latency, and result count.
+`research --fallback auto` permits local outage fallback and follow-up searches. `research --fallback off` disables both, while allowing reads of initially discovered URLs. Jev may choose complementary capabilities, but each provider remains limited to its supported operations. Every attempt records capability, provider, status, error type, latency, and result count.
 
-Research output includes `final_answer`, `citations`, `evidence_items`, `gap_check`, `provider_attempts`, `fallback_used`, `degraded`, `route_policy_version`, and `evidence_dir`. The synthesis is evidence-only. It may cite fetched/read evidence, but it must not cite unfetched discovery candidates as proof. If providers are exhausted or evidence cannot close, return the degraded gaps rather than inventing missing claims.
+Research output includes `final_answer`, `citations`, `evidence_items`, `gap_check`, `provider_attempts`, `fallback_used`, `degraded`, `route_policy_version`, and `evidence_dir`. The default report contains evidence excerpts; optional model synthesis uses that same read evidence. Unfetched discovery candidates cannot support citations. If providers are exhausted or evidence cannot close, return the gaps rather than inventing missing claims.
 
 Research provider advantage routing:
 
@@ -181,7 +181,7 @@ Research provider advantage routing:
 - AnySearch: explicit vertical intent only, such as CVE, finance, legal, academic, and repository/codebase search.
 - Sciverse: explicit-only academic provider in this release; use direct `sciverse-*` commands rather than `research` fallback.
 
-Safe research overrides are `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`. They may reorder or disable providers only inside capabilities the provider already supports; they must not move a provider across capability boundaries.
+Safe routing overrides are `SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS` and `SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS`; despite the names they apply to automatic routing in both ordinary search and research. They may reorder or disable providers only inside capabilities the provider already supports; they must not move a provider across capability boundaries.
 
 ## Closeout Lessons
 

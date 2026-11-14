@@ -1,0 +1,538 @@
+name: Desktop packages
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-build.yml"
+      - ".config/dotnet-tools.json"
+      - "desktop/**"
+      - "assets/branding/**"
+      - "mise.toml"
+      - "pyproject.toml"
+      - "src/smart_search/**"
+      - "tests/**"
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: "Validate Windows candidates only; skip macOS and release uploads"
+        type: boolean
+        default: false
+      sign_windows:
+        description: "Build self-signed Windows candidates (release_tag always requires signing)"
+        type: boolean
+        default: false
+      sign_macos:
+        description: "Use the maintainer's fixed macOS certificate (requires configured signing secrets)"
+        type: boolean
+        default: false
+      sign_macos_updates:
+        description: "Build Sparkle-signed macOS update candidates without publishing"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Existing stable vX.Y.Z tag and release; build and attach verified native updates"
+        default: ""
+      replace_existing_assets:
+        description: "Explicitly replace existing assets; never use this to silently change an installed version"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.architecture }} native update package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-latest
+            python_architecture: x64
+          - architecture: arm64
+            runner: windows-11-arm
+            python_architecture: arm64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        id: python
+        with:
+          python-version: "3.12"
+          architecture: ${{ matrix.python_architecture }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Validate release source before loading signing keys
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WINDOWS_ONLY: ${{ inputs.windows_only }}
+          SIGN_MACOS_UPDATES: ${{ inputs.sign_macos_updates }}
+          SIGN_MACOS: ${{ inputs.sign_macos }}
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -and $env:WINDOWS_ONLY -eq 'true') { throw 'A release requires both Windows and macOS; leave release_tag empty for Windows candidates.' }
+          if ($env:SIGN_MACOS_UPDATES -eq 'true' -and $env:WINDOWS_ONLY -eq 'true') { throw 'Sparkle signing requires macOS jobs; disable windows_only.' }
+          if ($env:SIGN_MACOS -eq 'true' -and $env:WINDOWS_ONLY -eq 'true') { throw 'macOS signing requires macOS jobs; disable windows_only.' }
+          if ($env:RELEASE_TAG) {
+            if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or $env:RELEASE_TAG -ne "v$version") { throw 'Tag and package version mismatch' }
+            $tag = git rev-parse "$($env:RELEASE_TAG)^{commit}"
+            if ($LASTEXITCODE -ne 0 -or $tag -ne (git rev-parse HEAD)) { throw 'Release tag does not match the build source' }
+          }
+      - name: Install build dependencies
+        run: python -m pip install --disable-pip-version-check ".[dev]" "pyinstaller==6.22.3"
+      - name: Test backend and client lifecycle
+        shell: pwsh
+        run: |
+          python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw 'Python regression failed' }
+          dotnet run --project desktop/tests/BackendLifecycleCheck --configuration Release -- "${{ steps.python.outputs.python-path }}" "$env:RUNNER_TEMP/smartsearch-client-lifecycle"
+          if ($LASTEXITCODE -ne 0) { throw 'Backend lifecycle check failed' }
+      - name: Fetch and verify the previous framework package
+        if: inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          python desktop/scripts/update_artifacts.py baseline --platform windows --architecture ${{ matrix.architecture }} --version $version --directory "$env:RUNNER_TEMP/previous-windows" --result "$env:RUNNER_TEMP/windows-baseline.json"
+          if ($LASTEXITCODE -ne 0) { throw 'Baseline lookup/download failed; this is not a first release' }
+      - name: Import pinned Windows signing identity
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_windows || inputs.release_tag != '')
+        shell: pwsh
+        env:
+          SMART_SEARCH_WINDOWS_PFX_BASE64: ${{ secrets.SMART_SEARCH_WINDOWS_PFX_BASE64 }}
+          SMART_SEARCH_WINDOWS_PFX_PASSWORD: ${{ secrets.SMART_SEARCH_WINDOWS_PFX_PASSWORD }}
+        run: ./desktop/scripts/Import-WindowsSigningIdentity.ps1
+      - name: Check signing failures and tamper rejection
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_windows || inputs.release_tag != '')
+        shell: pwsh
+        env:
+          SMART_SEARCH_WINDOWS_PFX_BASE64: ${{ secrets.SMART_SEARCH_WINDOWS_PFX_BASE64 }}
+          SMART_SEARCH_WINDOWS_PFX_PASSWORD: ${{ secrets.SMART_SEARCH_WINDOWS_PFX_PASSWORD }}
+        run: ./desktop/scripts/Test-WindowsSigning.ps1
+      - name: Build self-contained App and Velopack packages
+        shell: pwsh
+        env:
+          SIGNING_MODE: ${{ (inputs.sign_windows || inputs.release_tag != '') && 'Required' || 'Skip' }}
+        run: |
+          $buildArguments = @{ Architecture = '${{ matrix.architecture }}'; PythonPath = '${{ steps.python.outputs.python-path }}'; InstallerMode = 'Required'; SigningMode = $env:SIGNING_MODE }
+          $baseline = Join-Path $env:RUNNER_TEMP 'windows-baseline.json'
+          if (Test-Path -LiteralPath $baseline) {
+            $previous = Get-Content -Raw -LiteralPath $baseline | ConvertFrom-Json
+            if ($previous.directory) { $buildArguments.PreviousReleaseDirectory = $previous.directory }
+          }
+          ./desktop/scripts/Build-Windows.ps1 @buildArguments
+      - name: Verify real delta update, full fallback and installed signatures
+        shell: pwsh
+        env:
+          TARGET_ARCH: ${{ matrix.architecture }}
+          SIGNING_MODE: ${{ (inputs.sign_windows || inputs.release_tag != '') && 'Required' || 'Skip' }}
+        run: |
+          $results = @(Get-ChildItem ".desktop-artifacts/windows-$env:TARGET_ARCH-*/result.json")
+          if ($results.Count -ne 1) { throw 'Expected exactly one fresh build' }
+          python desktop/scripts/test_windows_updates.py $results[0].FullName --signing-mode $env:SIGNING_MODE
+          if ($LASTEXITCODE -ne 0) { throw 'Native update verification failed' }
+      - name: Remove only the runner signing identity
+        if: always() && github.event_name == 'workflow_dispatch' && (inputs.sign_windows || inputs.release_tag != '')
+        shell: pwsh
+        run: |
+          $public = [Security.Cryptography.X509Certificates.X509Certificate2]::new([IO.File]::ReadAllBytes((Join-Path $PWD 'desktop/packaging/windows/smart-search.cer')))
+          $identity = "Cert:/CurrentUser/My/$($public.Thumbprint)"
+          if (Test-Path -LiteralPath $identity) { Remove-Item -LiteralPath $identity -DeleteKey }
+          $public.Dispose()
+      - name: Stage complete Windows release assets
+        if: inputs.sign_windows || inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-windows-${{ matrix.architecture }}
+          path: .desktop-artifacts/windows-${{ matrix.architecture }}-*/installer/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Windows candidates and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-search-windows-${{ matrix.architecture }}-candidate
+          path: |
+            .desktop-artifacts/windows-${{ matrix.architecture }}-*/publish/
+            .desktop-artifacts/windows-${{ matrix.architecture }}-*/installer/*
+            .desktop-artifacts/windows-${{ matrix.architecture }}-*/result.json
+            .desktop-artifacts/com.smartsearch.test.*/*.json
+            .desktop-artifacts/com.smartsearch.test.*/*.log
+            .desktop-artifacts/signing-check-*/result.json
+          include-hidden-files: true
+          retention-days: 7
+
+  macos:
+    if: ${{ !inputs.windows_only }}
+    name: macOS ${{ matrix.architecture }} native update package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      # Preserve the SDK used to validate the PR51 native interface and icons.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: macos-15-intel
+          - architecture: arm64
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          persist-credentials: false
+      - name: Validate release source
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from pathlib import Path
+          tag = os.environ.get('RELEASE_TAG', '')
+          if tag:
+              assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag)
+              assert tag == 'v' + json.load(open('package.json'))['version']
+              assert subprocess.check_output(['git','rev-parse',tag+'^{commit}']) == subprocess.check_output(['git','rev-parse','HEAD'])
+              assert Path('desktop/macos/Sources/SmartSearchDesktop/AppUpdater.swift').is_file(), 'Release source must include the native updater'
+          PY
+      - name: Load macOS packaging from the workflow revision
+        if: inputs.release_tag != ''
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$WORKFLOW_SHA"
+          git restore --source="$WORKFLOW_SHA" -- mise.toml assets/branding desktop/scripts desktop/checks desktop/packaging/macos
+      - name: Set up packaging tools
+        uses: jdx/mise-action@v3
+      - name: Install build dependencies
+        run: |
+          mise run desktop:macos:install
+          .venv/bin/python -m pip install --disable-pip-version-check '.[dev]'
+      - name: Test backend and native models
+        run: |
+          .venv/bin/python -m pytest -q
+          swift test --package-path desktop/macos --configuration release --arch ${{ matrix.architecture }} --scratch-path .desktop-artifacts/macos-model-tests
+      - name: Fetch and verify previous Sparkle archive
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(.venv/bin/python -c 'import json; print(json.load(open("package.json"))["version"])')"
+          .venv/bin/python desktop/scripts/update_artifacts.py baseline --platform macos --architecture ${{ matrix.architecture }} --version "$version" --directory "$RUNNER_TEMP/previous-macos" --result "$RUNNER_TEMP/macos-baseline.json"
+      - name: Prepare explicitly configured Sparkle release signing
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_macos_updates || inputs.release_tag != '')
+        env:
+          SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY }}
+          SMART_SEARCH_SPARKLE_PUBLIC_KEY: ${{ vars.SMART_SEARCH_SPARKLE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY" && test -n "$SMART_SEARCH_SPARKLE_PUBLIC_KEY"
+          expected="$(.venv/bin/python -c 'import json; print(json.load(open("desktop/packaging/macos/sparkle-public-key.json"))["public_key"])')"
+          test "$SMART_SEARCH_SPARKLE_PUBLIC_KEY" = "$expected"
+          umask 077
+          printf '%s' "$SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY" > "$RUNNER_TEMP/smartsearch-sparkle-key"
+          printf 'SMART_SEARCH_SPARKLE_PUBLIC_KEY=%s\n' "$SMART_SEARCH_SPARKLE_PUBLIC_KEY" >> "$GITHUB_ENV"
+      - name: Build and verify macOS candidates with a disposable certificate
+        if: github.event_name != 'workflow_dispatch' || !(inputs.sign_macos || inputs.sign_macos_updates || inputs.release_tag != '')
+        run: mise run desktop:macos:with-signing --mode test -- mise run desktop:macos:ci --architecture '${{ matrix.architecture }}'
+      - name: Build App, DMG and configured Sparkle updates
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_macos || inputs.sign_macos_updates || inputs.release_tag != '')
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SIGN_SPARKLE_UPDATES: ${{ inputs.sign_macos_updates || inputs.release_tag != '' }}
+          SMART_SEARCH_MACOS_P12_BASE64: ${{ secrets.SMART_SEARCH_MACOS_P12_BASE64 }}
+          SMART_SEARCH_MACOS_P12_PASSWORD: ${{ secrets.SMART_SEARCH_MACOS_P12_PASSWORD }}
+          SMART_SEARCH_MACOS_CERT_SHA256: ${{ vars.SMART_SEARCH_MACOS_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          args=(--architecture '${{ matrix.architecture }}')
+          if [[ "$SIGN_SPARKLE_UPDATES" == true ]]; then
+            args+=(--release-updates --update-key-file "$RUNNER_TEMP/smartsearch-sparkle-key" --update-public-key "$SMART_SEARCH_SPARKLE_PUBLIC_KEY")
+          fi
+          if [[ -n "$RELEASE_TAG" ]]; then
+            previous="$(.venv/bin/python -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/macos-baseline.json"))["directory"] or "")')"
+            if [[ -n "$previous" ]]; then args+=(--previous-release-directory "$previous"); fi
+          fi
+          mise run desktop:macos:with-signing --mode required -- mise run desktop:macos:ci "${args[@]}"
+      - name: Remove only the temporary release key
+        if: always() && github.event_name == 'workflow_dispatch' && (inputs.sign_macos_updates || inputs.release_tag != '')
+        run: .venv/bin/python -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"smartsearch-sparkle-key").unlink(missing_ok=True)'
+      - name: Archive native inputs for the universal app
+        run: |
+          builds=(.desktop-artifacts/macos-${{ matrix.architecture }}-*/result.json)
+          test "${#builds[@]}" -eq 1
+          build="$(dirname "${builds[0]}")"
+          files=('Smart Search.app')
+          if [[ '${{ matrix.architecture }}' == arm64 ]]; then files+=(sparkle-tools); fi
+          tar -czf "$RUNNER_TEMP/macos-${{ matrix.architecture }}.tar.gz" -C "$build" "${files[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal-input-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/macos-${{ matrix.architecture }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+      - name: Stage complete macOS release assets
+        if: inputs.sign_macos_updates || inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-macos-${{ matrix.architecture }}
+          path: .desktop-artifacts/macos-${{ matrix.architecture }}-*/updates/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload macOS candidates and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-search-macos-${{ matrix.architecture }}-candidate
+          path: |
+            .desktop-artifacts/macos-${{ matrix.architecture }}-*/*.dmg
+            .desktop-artifacts/macos-${{ matrix.architecture }}-*/result.json
+            .desktop-artifacts/macos-${{ matrix.architecture }}-*/signing.json
+            .desktop-artifacts/macos-${{ matrix.architecture }}-*/cli/*
+            .desktop-artifacts/macos-${{ matrix.architecture }}-*/updates/*
+            .desktop-artifacts/sparkle-check-*/*.json
+            .desktop-artifacts/sparkle-check-*/*.log
+          include-hidden-files: true
+          retention-days: 7
+
+  macos-universal:
+    name: macOS universal package and native ARM verification
+    needs: macos
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+          persist-credentials: false
+      - name: Load macOS packaging from the workflow revision
+        if: inputs.release_tag != ''
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$WORKFLOW_SHA"
+          git restore --source="$WORKFLOW_SHA" -- mise.toml desktop/scripts desktop/checks desktop/packaging/macos
+      - uses: jdx/mise-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: universal-input-*
+          path: native-inputs
+          merge-multiple: true
+      - name: Extract matching native builds
+        run: |
+          for architecture in arm64 x86_64; do
+            mkdir "native-inputs/$architecture"
+            tar -xzf "native-inputs/macos-$architecture.tar.gz" -C "native-inputs/$architecture"
+          done
+      - name: Fetch and verify previous universal Sparkle archive
+        if: inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(mise run python -c 'import json; print(json.load(open("package.json"))["version"])')"
+          mise run desktop:release:baseline --platform macos --architecture universal --version "$version" --directory "$RUNNER_TEMP/previous-universal" --result "$RUNNER_TEMP/universal-baseline.json"
+      - name: Prepare explicitly configured Sparkle release signing
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_macos_updates || inputs.release_tag != '')
+        env:
+          SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY }}
+          SMART_SEARCH_SPARKLE_PUBLIC_KEY: ${{ vars.SMART_SEARCH_SPARKLE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY" && test -n "$SMART_SEARCH_SPARKLE_PUBLIC_KEY"
+          expected="$(mise run python -c 'import json; print(json.load(open("desktop/packaging/macos/sparkle-public-key.json"))["public_key"])')"
+          test "$SMART_SEARCH_SPARKLE_PUBLIC_KEY" = "$expected"
+          umask 077
+          printf '%s' "$SMART_SEARCH_SPARKLE_EDDSA_PRIVATE_KEY" > "$RUNNER_TEMP/smartsearch-sparkle-key"
+      - name: Build and verify the universal candidate with a disposable certificate
+        if: github.event_name != 'workflow_dispatch' || !(inputs.sign_macos || inputs.sign_macos_updates || inputs.release_tag != '')
+        run: |
+          mise run desktop:macos:with-signing --mode test -- mise run desktop:macos:ci --universal \
+            --arm64-app "$PWD/native-inputs/arm64/Smart Search.app" \
+            --x86_64-app "$PWD/native-inputs/x86_64/Smart Search.app" \
+            --sparkle-tools "$PWD/native-inputs/arm64/sparkle-tools"
+      - name: Build and verify the universal App with the maintainer identity
+        if: github.event_name == 'workflow_dispatch' && (inputs.sign_macos || inputs.sign_macos_updates || inputs.release_tag != '')
+        env:
+          SIGN_SPARKLE_UPDATES: ${{ inputs.sign_macos_updates || inputs.release_tag != '' }}
+          SMART_SEARCH_MACOS_P12_BASE64: ${{ secrets.SMART_SEARCH_MACOS_P12_BASE64 }}
+          SMART_SEARCH_MACOS_P12_PASSWORD: ${{ secrets.SMART_SEARCH_MACOS_P12_PASSWORD }}
+          SMART_SEARCH_MACOS_CERT_SHA256: ${{ vars.SMART_SEARCH_MACOS_CERT_SHA256 }}
+        run: |
+          args=(--arm64-app "$PWD/native-inputs/arm64/Smart Search.app" --x86_64-app "$PWD/native-inputs/x86_64/Smart Search.app" --sparkle-tools "$PWD/native-inputs/arm64/sparkle-tools")
+          if [[ "$SIGN_SPARKLE_UPDATES" == true ]]; then args+=(--release-updates --update-key-file "$RUNNER_TEMP/smartsearch-sparkle-key"); fi
+          if [[ -f "$RUNNER_TEMP/universal-baseline.json" ]]; then
+            previous="$(mise run python -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/universal-baseline.json"))["directory"] or "")')"
+            if [[ -n "$previous" ]]; then args+=(--previous-release-directory "$previous"); fi
+          fi
+          mise run desktop:macos:with-signing --mode required -- mise run desktop:macos:ci --universal "${args[@]}"
+      - name: Remove only the temporary release key
+        if: always() && github.event_name == 'workflow_dispatch' && (inputs.sign_macos_updates || inputs.release_tag != '')
+        run: mise run python -c 'import os,pathlib; pathlib.Path(os.environ["RUNNER_TEMP"],"smartsearch-sparkle-key").unlink(missing_ok=True)'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal-dmg
+          path: |
+            .desktop-artifacts/macos-universal-*/*.dmg
+            .desktop-artifacts/macos-universal-*/signing.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Stage complete universal release assets
+        if: inputs.sign_macos_updates || inputs.release_tag != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-macos-universal
+          path: .desktop-artifacts/macos-universal-*/updates/*
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload universal verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-search-macos-universal-evidence
+          path: |
+            .desktop-artifacts/macos-universal-*/result.json
+            .desktop-artifacts/macos-universal-*/signing.json
+            .desktop-artifacts/sparkle-check-*/*.json
+            .desktop-artifacts/sparkle-check-*/*.log
+          include-hidden-files: true
+          retention-days: 7
+
+  macos-universal-intel:
+    name: Verify the same universal DMG on native Intel
+    needs: macos-universal
+    runs-on: macos-15-intel
+    timeout-minutes: 15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@v3
+      - uses: actions/download-artifact@v4
+        with:
+          name: universal-dmg
+          path: universal-dmg
+      - name: Verify both slices and the installed Intel App
+        env:
+          FORMAL_SIGNING: ${{ github.event_name == 'workflow_dispatch' && (inputs.sign_macos || inputs.sign_macos_updates || inputs.release_tag != '') }}
+          SMART_SEARCH_MACOS_CERT_SHA256: ${{ vars.SMART_SEARCH_MACOS_CERT_SHA256 }}
+        run: |
+          shopt -s nullglob
+          dmgs=(universal-dmg/*/SmartSearch-v*.dmg universal-dmg/SmartSearch-v*.dmg)
+          test "${#dmgs[@]}" -eq 1
+          version="$(basename "${dmgs[0]}" .dmg)"
+          certificate="$(mise run python - "$(dirname "${dmgs[0]}")/signing.json" <<'PY'
+          import json, os, sys
+          signing = json.load(open(sys.argv[1]))
+          formal = os.environ['FORMAL_SIGNING'] == 'true'
+          assert signing['kind'] == ('self-signed' if formal else 'self-signed-test')
+          fingerprint = signing['certificate_sha256']
+          if formal:
+              assert fingerprint == os.environ['SMART_SEARCH_MACOS_CERT_SHA256'].upper()
+          print(fingerprint)
+          PY
+          )"
+          mise run desktop:macos:verify "${dmgs[0]}" --architecture universal --runtime-architecture x86_64 --version "${version#SmartSearch-v}" --signing-mode required --certificate-sha256 "$certificate"
+
+  release-assets:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != '' && !inputs.windows_only
+    needs: [windows, macos, macos-universal-intel]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_tag }}
+          persist-credentials: false
+      - name: Load the release validator from the workflow revision
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$WORKFLOW_SHA"
+          git restore --source="$WORKFLOW_SHA" -- mise.toml desktop/scripts/update_artifacts.py desktop/scripts/release_notes.py
+      - uses: jdx/mise-action@v3
+        with:
+          install_args: python
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-package-*
+          path: release-packages
+          merge-multiple: true
+      - name: Verify every feed reference and create checksums
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          SMART_SEARCH_MACOS_CERT_SHA256: ${{ vars.SMART_SEARCH_MACOS_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path('release-packages')
+          files = []
+          names = set()
+          for path in root.rglob('*'):
+              if path.is_symlink():
+                  raise ValueError(f'Symlink in release assets: {path}')
+              if path.is_file():
+                  if path.name in names:
+                      raise ValueError(f'Duplicate release asset: {path.name}')
+                  names.add(path.name)
+                  files.append(path)
+          for path in files:
+              target = root / path.name
+              if path != target:
+                  if target.exists():
+                      raise ValueError(f'Release asset target exists: {target}')
+                  path.rename(target)
+          PY
+          mise run desktop:release:validate --version "${RELEASE_TAG#v}" --directory release-packages --macos-certificate-sha256 "$SMART_SEARCH_MACOS_CERT_SHA256"
+      - name: Attach verified packages before exposing update feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPLACE_EXISTING_ASSETS: ${{ inputs.replace_existing_assets }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          upload_args=()
+          if [[ "$REPLACE_EXISTING_ASSETS" == true ]]; then upload_args+=(--clobber); fi
+          packages=(); feeds=()
+          for file in release-packages/*; do
+            [[ -f "$file" ]] || continue
+            case "$(basename "$file")" in
+              releases.*.json|appcast-*.xml) feeds+=("$file") ;;
+              *) packages+=("$file") ;;
+            esac
+          done
+          gh release upload "$RELEASE_TAG" "${packages[@]}" --repo "$GITHUB_REPOSITORY" "${upload_args[@]}"
+          gh release upload "$RELEASE_TAG" "${feeds[@]}" --repo "$GITHUB_REPOSITORY" "${upload_args[@]}"
+      - name: Update release download tables after all uploads succeed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/existing-notes.md"
+          mise run desktop:release:notes --version "${RELEASE_TAG#v}" --directory release-packages --repository "$GITHUB_REPOSITORY" --existing "$RUNNER_TEMP/existing-notes.md" --output "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"

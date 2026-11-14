@@ -32,40 +32,12 @@ function run(command, args, options = {}) {
 }
 
 function runNpm(args, options = {}) {
-  if (process.env.npm_execpath) {
-    return run(process.execPath, [process.env.npm_execpath, ...args], options);
-  }
-  return run("npm", args, { ...options, shell: process.platform === "win32" });
+  const [node, arguments_] = require("./npm-command")(args);
+  return run(node, arguments_, options);
 }
 
-function assertPackContents(files) {
-  assert.ok(Array.isArray(files), "npm pack --json must report the packed file list");
-  const exactFiles = new Set([
-    "LICENSE",
-    "README.md",
-    "README.zh-CN.md",
-    "package.json",
-    "pyproject.toml"
-  ]);
-  const allowedPrefixes = [
-    "npm/",
-    "skills/smart-search-cli/",
-    "src/smart_search/assets/skills/smart-search-cli/"
-  ];
-  const unexpected = files
-    .map((file) => file.path)
-    .filter(
-      (filePath) =>
-        !exactFiles.has(filePath) &&
-        !allowedPrefixes.some((prefix) => filePath.startsWith(prefix)) &&
-        !(filePath.startsWith("src/smart_search/") && path.extname(filePath) === ".py")
-    );
-
-  assert.deepEqual(unexpected, [], "tarball contains files outside package.json files declarations");
-  for (const requiredPath of ["package.json", "pyproject.toml", "npm/bin/smart-search.js", "src/smart_search/cli.py"]) {
-    assert.ok(files.some((file) => file.path === requiredPath), `tarball is missing ${requiredPath}`);
-  }
-}
+const nativeDirectory = process.argv[2];
+assert.ok(nativeDirectory, "Usage: node npm/scripts/smoke-packed-install.js <platform-package-directory>");
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "smart-search-tarball-"));
 const tarballDir = path.join(tempRoot, "tarball");
@@ -80,13 +52,18 @@ const packed = JSON.parse(
   runNpm(["pack", "--json", "--pack-destination", tarballDir], { capture: true })
 );
 assert.equal(packed.length, 1, "npm pack must produce exactly one tarball");
-assertPackContents(packed[0].files);
+assert.ok(packed[0].files.some(file => file.path === "npm/bin/smart-search.js"));
+assert.ok(!packed[0].files.some(file => file.path.endsWith(".py") || file.path.includes("postinstall")), "main package must not install source Python");
+const nativePacked = JSON.parse(runNpm(["pack", path.resolve(nativeDirectory), "--json", "--pack-destination", tarballDir], { capture: true }))[0];
+assert.ok(nativePacked.files.some(file => /runtime\/smart-search\/smart-search(?:\.exe)?$/.test(file.path)));
+assert.ok(nativePacked.files.some(file => /(?:libpython|Python|python313\.dll)/i.test(file.path)), "native package must contain its interpreter");
 
 const tarballPath = path.join(tarballDir, packed[0].filename);
 assert.ok(fs.existsSync(tarballPath), `npm pack did not create ${tarballPath}`);
-runNpm(["install", "--no-audit", "--no-fund", "--prefix", installPrefix, tarballPath]);
+runNpm(["install", "--offline", "--ignore-scripts", "--global", "--no-audit", "--no-fund", "--prefix", installPrefix,
+  tarballPath, path.join(tarballDir, nativePacked.filename)]);
 
-const installedRoot = path.join(installPrefix, "node_modules", "@konbakuyomu", "smart-search");
+const installedRoot = path.join(installPrefix, process.platform === "win32" ? "" : "lib", "node_modules", "@konbakuyomu", "smart-search");
 const wrapperPath = path.join(installedRoot, "npm", "bin", "smart-search.js");
 assert.ok(fs.existsSync(wrapperPath), "packed install is missing the smart-search wrapper");
 
@@ -94,7 +71,16 @@ const isolatedEnv = {
   ...process.env,
   HOME: homeDir,
   USERPROFILE: homeDir,
-  INIT_CWD: callerCwd
+  SMART_SEARCH_CONFIG_DIR: path.join(tempRoot, "config"),
+  SMART_SEARCH_LANGUAGE: "en",
+  PATH: callerCwd,
+  PYTHONHOME: path.join(tempRoot, "broken-python"),
+  PYTHONPATH: path.join(tempRoot, "broken-modules"),
+  VIRTUAL_ENV: path.join(tempRoot, "broken-venv"),
+  CONDA_PREFIX: path.join(tempRoot, "broken-conda"),
+  SMART_SEARCH_PYTHON: path.join(tempRoot, "missing-python"),
+  _PYI_APPLICATION_HOME_DIR: path.join(tempRoot, "wrong-pyinstaller"),
+  INIT_CWD: path.join(tempRoot, "wrong-cwd")
 };
 const version = run(process.execPath, [wrapperPath, "--version"], {
   cwd: callerCwd,
@@ -102,13 +88,34 @@ const version = run(process.execPath, [wrapperPath, "--version"], {
   capture: true
 });
 assert.match(version, new RegExp(`smart-search ${packageJson.version.replaceAll(".", "\\.")}`));
-run(process.execPath, [wrapperPath, "regression"], { cwd: callerCwd, env: isolatedEnv });
+for (const [language, heading] of [["zh", "用法"], ["en", "usage"]]) {
+  const help = run(process.execPath, [wrapperPath, "config", "list", "--help", "--lang", language], {
+    cwd: callerCwd, env: isolatedEnv, capture: true
+  });
+  assert.ok(help.includes(heading), `installed package is missing ${language} help`);
+  const route = JSON.parse(run(process.execPath, [wrapperPath, "route", "用户 query", "--router-mode", "rules", "--lang", language], {
+    cwd: callerCwd, env: isolatedEnv, capture: true
+  }));
+  assert.equal(route.query, "用户 query");
+  assert.equal(route.executed_search, false);
+}
+run(process.execPath, [wrapperPath, "regression"], { cwd: callerCwd, env: isolatedEnv, capture: true });
 const smokeOutput = run(process.execPath, [wrapperPath, "smoke", "--mock", "--format", "json"], {
   cwd: callerCwd,
   env: isolatedEnv,
   capture: true
 });
 assert.equal(JSON.parse(smokeOutput).ok, true, "packed mock smoke must report ok=true");
+
+const uiCheck = JSON.parse(
+  run(process.execPath, [wrapperPath, "ui", "--check", "--format", "json"], {
+    cwd: callerCwd,
+    env: isolatedEnv,
+    capture: true
+  })
+);
+assert.equal(uiCheck.ok, true, "packed install must be able to resolve the config UI page");
+assert.ok(uiCheck.asset_bytes > 1000, "packed config UI page must not be empty");
 
 const skillsUpdate = JSON.parse(
   run(
@@ -151,4 +158,21 @@ const skillsStatus = JSON.parse(
 );
 assert.equal(skillsStatus.targets[0].status, "up_to_date", "packed OpenCode status must inspect the canonical global path");
 
-console.log(`Packed tarball install smoke passed in temporary prefix ${installPrefix}.`);
+const capabilities = JSON.parse(run(process.execPath, [wrapperPath, "--desktop-capabilities"], { cwd: callerCwd, env: isolatedEnv, capture: true }));
+assert.equal(capabilities.product, "smart-search");
+assert.equal(capabilities.desktop_protocol_version, 1);
+assert.equal(capabilities.version, packageJson.version);
+const protocol = spawnSync(process.execPath, [wrapperPath, "--desktop-backend"], {
+  cwd: callerCwd, env: isolatedEnv, encoding: "utf8", timeout: 60000,
+  input: JSON.stringify({ id: 1, method: "initialize", params: { protocol_version: 1, independent_cli: true, enable_update_checks: false, config_dir: path.join(tempRoot, "protocol-config") } }) + "\n"
+    + JSON.stringify({ id: 2, method: "shutdown", params: {} }) + "\n"
+});
+assert.equal(protocol.status, 0, protocol.stderr);
+const messages = protocol.stdout.trim().split("\n").map(line => JSON.parse(line));
+assert.equal(messages.find(message => message.id === 1)?.result?.version, packageJson.version);
+assert.ok(messages.find(message => message.id === 2)?.result);
+assert.equal(fs.existsSync(path.join(installedRoot, ".smart-search-python")), false);
+runNpm(["uninstall", "--global", "--prefix", installPrefix, packageJson.name]);
+assert.equal(fs.existsSync(wrapperPath), false);
+assert.ok(fs.existsSync(opencodeSkill), "uninstall must preserve Skills");
+console.log(`PASS: npm packed install/uninstall, no Python on PATH, poisoned Python environment, UTF-8, Skills and App protocol (${installPrefix})`);

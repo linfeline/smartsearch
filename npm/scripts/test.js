@@ -1,75 +1,33 @@
-const { spawnSync } = require("node:child_process");
+const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-
-const packageRoot = path.resolve(__dirname, "..", "..");
-const venvDir = path.join(packageRoot, ".smart-search-python");
-const pythonPath =
-  process.platform === "win32"
-    ? path.join(venvDir, "Scripts", "python.exe")
-    : path.join(venvDir, "bin", "python");
-
-function run(command, args, options = {}) {
-  const result = spawnSync(command, args, {
-    cwd: packageRoot,
-    stdio: "inherit",
-    shell: options.shell || false,
-    windowsHide: true
+const os = require("node:os");
+const { spawnSync } = require("node:child_process");
+const root = path.resolve(__dirname, "../..");
+const packageJson = require("../../package.json");
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), "smart-search-launcher-"));
+try {
+  fs.mkdirSync(path.join(temp, "npm/bin"), { recursive: true });
+  fs.copyFileSync(path.join(root, "npm/bin/smart-search.js"), path.join(temp, "npm/bin/smart-search.js"));
+  fs.writeFileSync(path.join(temp, "package.json"), JSON.stringify(packageJson));
+  const launch = () => spawnSync(process.execPath, [path.join(temp, "npm/bin/smart-search.js"), "--version"], {
+    env: { ...process.env, PATH: temp, PYTHONHOME: "/invalid-python", SMART_SEARCH_PYTHON: "/invalid-python" }, encoding: "utf8"
   });
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
-  }
-  if (result.status !== 0) {
-    process.exit(result.status || 1);
-  }
-}
-
-function capture(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: packageRoot,
-    encoding: "utf8",
-    windowsHide: true
-  });
-  if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
-  }
-  if (result.status !== 0) {
-    process.stdout.write(result.stdout || "");
-    process.stderr.write(result.stderr || "");
-    process.exit(result.status || 1);
-  }
-  return result.stdout || "";
-}
-
-function runNpm(args) {
-  if (process.env.npm_execpath) {
-    run(process.execPath, [process.env.npm_execpath, ...args]);
-    return;
-  }
-  run("npm", args, { shell: process.platform === "win32" });
-}
-
-if (!fs.existsSync(pythonPath)) {
-  console.error("Missing .smart-search-python runtime. Run npm install first.");
-  process.exit(1);
-}
-
-run(pythonPath, ["-m", "pip", "install", "--disable-pip-version-check", "-e", ".[dev]"]);
-run(pythonPath, ["-m", "pytest"]);
-run(process.execPath, ["npm/scripts/test-wrapper-repair.js"]);
-run(process.execPath, ["npm/bin/smart-search.js", "--help"]);
-const deepJson = capture(process.execPath, [
-  "npm/bin/smart-search.js",
-  "deep",
-  "深度搜索一下最近的比特币行情",
-  "--format",
-  "json"
-]);
-const deepPlan = JSON.parse(deepJson);
-if (deepPlan.question !== "深度搜索一下最近的比特币行情") {
-  console.error("npm wrapper must preserve non-ASCII CLI arguments and JSON output as UTF-8.");
-  process.exit(1);
-}
-runNpm(["pack", "--dry-run"]);
+  let result = launch();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /missing or damaged/);
+  assert.match(result.stderr, /--include=optional/);
+  assert.equal(fs.existsSync(path.join(temp, ".smart-search-python")), false);
+  const platformName = `${packageJson.name}-${process.platform}-${process.arch}`;
+  const native = path.join(temp, "node_modules", platformName);
+  fs.mkdirSync(native, { recursive: true });
+  fs.writeFileSync(path.join(native, "package.json"), JSON.stringify({ name: platformName, version: "0.0.0" }));
+  result = launch();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /version mismatch/);
+  fs.writeFileSync(path.join(temp, "package.json"), JSON.stringify({ ...packageJson, optionalDependencies: {} }));
+  result = launch();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unsupported platform/);
+  console.log("PASS: missing binary, mismatched version, unsupported platform; no Python fallback");
+} finally { fs.rmSync(temp, { recursive: true, force: true }); }

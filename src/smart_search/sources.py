@@ -8,11 +8,14 @@ from typing import Any
 import asyncio
 
 from .config import config
-from .url_utils import extract_unique_urls, normalize_extracted_url
+from .utils import NO_WEB_SEARCH_MARKER, extract_unique_urls
 
 
 _MD_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
 _INLINE_CITATION_LINK_PATTERN = re.compile(r"\[\[(\d+)\]\]\((https?://[^)]+)\)")
+# How OpenAI search models cite at the end of a sentence or bullet: "... in 2026. ([python.org](https://...))"
+_PARENTHESIZED_CITATION_PATTERN = re.compile(r"[(（]\s*\[[^\]]+\]\(https?://[^)\s]+\)\s*[)）]")
+_BARE_OR_ANGLE_URL_PATTERN = re.compile(r"<?https?://[^\s>]+>?")
 _SOURCES_HEADING_PATTERN = re.compile(
     r"(?im)^"
     r"(?:#{1,6}\s*)?"
@@ -27,6 +30,17 @@ _SOURCES_FUNCTION_PATTERN = re.compile(
 )
 
 _THINK_BLOCK_PATTERN = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
+
+_INTENT_SENTENCE = re.compile(
+    r"(?:(?:ok(?:ay)?|sure|alright)[,!.]?\s+)?"
+    r"(?:(?:i'll|i will|i'm going to|i am going to|let me|let's|i need to|first,?\s+i'll)\b.{0,200}?"
+    r"\b(?:look|search|check|find|research|browse|dig|gather|pull|review|investigate|query|consult|verify)"
+    r"|(?:searching|looking up|looking into|checking|researching|gathering|browsing|pulling up)\b"
+    r"(?!\s+(?:is|are|was|were|can|could|will|would|should|has|have|must|may|might)\b))"
+    r"|(?:好的?[，,]?\s*)?(?:我|让我|下面我|接下来我|正在)(?:先|将|会|来|马上|去|再)*"
+    r"(?:检索|搜索|查找|查询|查一下|查阅|搜一下|调研|核实)",
+    re.IGNORECASE,
+)
 
 _LEADING_POLICY_PATTERNS = [
     re.compile(r"^I\s+cannot\s+(comply|assist|help|provide|fulfill)", re.IGNORECASE),
@@ -126,20 +140,29 @@ def merge_sources(*source_lists: list[dict]) -> list[dict]:
     for sources in source_lists:
         for item in sources or []:
             url = (item or {}).get("url")
-            if not isinstance(url, str):
+            if not isinstance(url, str) or not url.strip():
                 continue
             url = url.strip()
-            if url.startswith(("http://", "https://", "HTTP://", "HTTPS://")):
-                url = normalize_extracted_url(url)
-            if not url:
-                continue
             if url in seen:
                 continue
             seen.add(url)
-            normalized_item = dict(item)
-            normalized_item["url"] = url
-            merged.append(normalized_item)
+            merged.append(item)
     return merged
+
+
+def model_answer_problem(answer: str, sources: list[dict]) -> tuple[str, str] | None:
+    if answer.strip().split("\n", 1)[0].strip("*_` ") == NO_WEB_SEARCH_MARKER:
+        return "no_web_search", "Search model reported that it has no web search access"
+    if not sources and not extract_unique_urls(answer):
+        return "no_sources", "Search model answer contained no source URLs"
+    body = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", answer.strip())
+    body = re.sub(r"https?://\S+", "", body)
+    body = re.sub(r"\[\d+\]", "", body).strip()
+    sentences = [s.strip(" -*>#") for s in re.split(r"(?<=[.!?])\s+|(?<=[。！？；])|\n+", body)]
+    sentences = [s for s in sentences if s]
+    if len(body) <= 500 and sentences and all(_INTENT_SENTENCE.match(s) for s in sentences):
+        return "preface_only", "Search model returned only a preface announcing a search"
+    return None
 
 
 def split_answer_and_sources(text: str) -> tuple[str, list[dict]]:
@@ -318,9 +341,18 @@ def _is_link_only_line(line: str) -> bool:
         return False
     if stripped.startswith(("http://", "https://")):
         return True
+    citation = _PARENTHESIZED_CITATION_PATTERN.search(stripped)
+    if citation and _has_prose(stripped[: citation.start()]):
+        # A sentence that ends with its citation belongs to the answer, not to a trailing source list.
+        return False
     if _MD_LINK_PATTERN.search(stripped):
         return True
     return False
+
+
+def _has_prose(text: str) -> bool:
+    text = _BARE_OR_ANGLE_URL_PATTERN.sub("", _MD_LINK_PATTERN.sub("", text))
+    return re.search(r"[^\W\d_]", text) is not None
 
 
 def _parse_sources_payload(payload: str) -> list[dict]:
@@ -371,8 +403,7 @@ def _normalize_sources(data: Any) -> list[dict]:
 
         if isinstance(item, (list, tuple)) and len(item) >= 2:
             title, url = item[0], item[1]
-            url = normalize_extracted_url(url) if isinstance(url, str) else ""
-            if url and url not in seen:
+            if isinstance(url, str) and url.startswith(("http://", "https://")) and url not in seen:
                 seen.add(url)
                 out: dict = {"url": url}
                 if isinstance(title, str) and title.strip():
@@ -382,8 +413,7 @@ def _normalize_sources(data: Any) -> list[dict]:
 
         if isinstance(item, dict):
             url = item.get("url") or item.get("href") or item.get("link")
-            url = normalize_extracted_url(url) if isinstance(url, str) else ""
-            if not url:
+            if not isinstance(url, str) or not url.startswith(("http://", "https://")):
                 continue
             if url in seen:
                 continue

@@ -1,2 +1,0 @@
-{"file":".trellis/spec/backend/provider-capability-contract.md","reason":"Implement Context7 and AnySearch changes inside the existing provider capability and output contracts."}
-{"file":".trellis/tasks/08-07-stable-release-015/design.md","reason":"Apply the approved dynamic selection, parameter precedence and local truncation design."}

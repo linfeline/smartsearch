@@ -19,6 +19,7 @@ APPROVED_PROVIDER_ERROR_TYPES: Final[frozenset[str]] = frozenset(
         "rate_limited",
         "network_error",
         "parse_error",
+        "quality_error",
         "provider_error",
         "runtime_error",
     }
@@ -44,8 +45,12 @@ def sanitize_provider_error_message(
     limit: int = 300,
 ) -> str:
     """Return a compact provider error excerpt without credentials."""
-    text = str(value or "")
-    for secret in additional_secrets:
+    from .config import config
+    from .i18n import Message, render_messages
+
+    # Only explicit tool-owned copy is translated. Upstream errors are never guessed.
+    text = render_messages(value) if isinstance(value, Message) else str(value or "")
+    for secret in sorted(set(additional_secrets) | set(config.secret_values()), key=len, reverse=True):
         if secret:
             text = text.replace(str(secret), "[REDACTED]")
     text = _URL_CREDENTIALS_RE.sub(r"\1[REDACTED]@", text)

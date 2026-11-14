@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from smart_search.config import Config
+from smart_search.i18n import use_language
 
 
 def _fresh_config_file(monkeypatch):
@@ -149,6 +150,6 @@ def test_save_unwritable_raises_with_hint(monkeypatch, tmp_path):
     bogus = blocker / "child"
     monkeypatch.setenv("SMART_SEARCH_CONFIG_DIR", str(bogus))
     config = _fresh_config_file(monkeypatch)
-    with pytest.raises(ValueError) as exc:
+    with use_language("zh"), pytest.raises(ValueError) as exc:
         config._save_config_file({"x": 1})
     assert "无法保存" in str(exc.value)

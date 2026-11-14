@@ -4,6 +4,7 @@ import contextlib
 import getpass
 import inspect
 import json
+import os
 from importlib import metadata
 import subprocess
 import sys
@@ -11,11 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from . import service
-from .embedding_presets import (
-    QWEN3_EMBEDDING_8B_PRESET,
-    embedding_preset_for_model,
-)
+from . import activity, service
+from .i18n import LANGUAGE_KEY, current_language, normalize, parser_error, render_messages, resolve, tr, use_language
 from .providers.anysearch import parse_sub_domain_params
 from .sciverse_schema import (
     SciverseParameterError,
@@ -74,7 +72,15 @@ COMMAND_ALIASES = {
     "setup": ["init"],
     "skills": ["skill"],
     "config": ["cfg"],
+    "providers": ["prov"],
     "regression": ["reg"],
+}
+
+UI_COMMAND_ALIASES = ["web"]
+PROVIDERS_COMMAND_ALIASES = {
+    "status": ["st", "ls"],
+    "reset": ["clear"],
+    "test": ["check", "probe"],
 }
 
 CONFIG_COMMAND_ALIASES = {
@@ -95,10 +101,22 @@ SKILLS_COMMAND_ALIASES = {
 }
 
 
+class LocalizedHelpFormatter(argparse.HelpFormatter):
+    def _format_usage(self, usage, actions, groups, prefix=None):
+        return super()._format_usage(usage, actions, groups, tr("usage: ") if prefix is None else prefix)
+
+
 class SmartSearchArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("allow_abbrev", False)
+        kwargs.setdefault("formatter_class", LocalizedHelpFormatter)
         super().__init__(*args, **kwargs)
+        self.add_argument("--lang", type=normalize, choices=["auto", "zh", "en"], default=argparse.SUPPRESS,
+                          help="Interface language for this call; does not change the saved preference.")
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_PARAMETER_ERROR, str(tr("{0}: error: {1}\n", self.prog, parser_error(message))))
 
 
 TAVILY_DEFAULT_API_URL = "https://api.tavily.com"
@@ -148,7 +166,7 @@ def _get_version() -> str:
 
 
 def _json(data: Any) -> str:
-    return json.dumps(data, ensure_ascii=False, indent=2)
+    return json.dumps(render_messages(data), ensure_ascii=False, indent=2)
 
 
 def _json_stdout_safe(data: Any) -> str:
@@ -182,21 +200,35 @@ def _one_line(value: Any, limit: int = 160) -> str:
     return text
 
 
-def _md_cell(value: Any) -> str:
-    return _one_line(value).replace("|", r"\|")
+MD_CELL_LIMIT = 160
 
 
-def _markdown_table(headers: list[str], rows: list[list[Any]]) -> list[str]:
+def _md_cell(value: Any, limit: int = MD_CELL_LIMIT) -> str:
+    return _one_line(value, limit).replace("|", r"\|")
+
+
+def _markdown_table(
+    headers: list[str],
+    rows: list[list[Any]],
+    exact_headers: set[str] | None = None,
+) -> list[str]:
+    """Render a Markdown table.
+
+    `exact_headers` names columns holding exact identifiers (paths, URLs, IDs)
+    instead of prose. Those cells are never capped: a truncated path points at
+    a location that does not exist, which is worse than a wide table.
+    """
     if not rows:
         return []
+    cell_limits = [0 if header in (exact_headers or set()) else MD_CELL_LIMIT for header in headers]
     lines = [
-        "| " + " | ".join(_md_cell(header) for header in headers) + " |",
+        "| " + " | ".join(_md_cell(tr(header)) for header in headers) + " |",
         "| " + " | ".join("---" for _ in headers) + " |",
     ]
     for row in rows:
         cells = list(row)[: len(headers)]
         cells.extend([""] * (len(headers) - len(cells)))
-        lines.append("| " + " | ".join(_md_cell(cell) for cell in cells) + " |")
+        lines.append("| " + " | ".join(_md_cell(cell, limit) for cell, limit in zip(cells, cell_limits)) + " |")
     return lines
 
 
@@ -210,38 +242,38 @@ def _markdown_code_block(value: Any) -> list[str]:
 
 def _status_label(value: Any) -> str:
     if isinstance(value, bool):
-        return "OK" if value else "FAIL"
+        return tr('OK') if value else tr('FAIL')
     status = str(value or "").strip()
     normalized = status.lower()
     labels = {
-        "ok": "OK",
-        "true": "OK",
-        "healthy": "HEALTHY",
-        "degraded": "DEGRADED",
-        "configured": "CONFIGURED",
-        "disabled": "DISABLED",
-        "warning": "WARN",
-        "timeout": "TIMEOUT",
-        "error": "ERROR",
-        "config_error": "CONFIG ERROR",
-        "not_configured": "NOT CONFIGURED",
-        "false": "FAIL",
-        "failed": "FAIL",
-        "empty": "EMPTY",
-        "skipped": "SKIPPED",
+        "ok": tr('OK'),
+        "true": tr('OK'),
+        "healthy": tr('HEALTHY'),
+        "degraded": tr('DEGRADED'),
+        "configured": tr('CONFIGURED'),
+        "disabled": tr('DISABLED'),
+        "warning": tr('WARN'),
+        "timeout": tr('TIMEOUT'),
+        "error": tr('ERROR'),
+        "config_error": tr('CONFIG ERROR'),
+        "not_configured": tr('NOT CONFIGURED'),
+        "false": tr('FAIL'),
+        "failed": tr('FAIL'),
+        "empty": tr('EMPTY'),
+        "skipped": tr('SKIPPED'),
     }
     return labels.get(normalized, status.upper() if status else "-")
 
 
 def _yes_no(value: Any) -> str:
-    return "YES" if bool(value) else "NO"
+    return tr('YES') if bool(value) else tr('NO')
 
 
 def _latency_text(value: Any) -> str:
     if value in (None, ""):
         return "-"
     if isinstance(value, (int, float)):
-        return f"{value:.2f} ms"
+        return tr('{0:.2f} ms', value)
     return str(value)
 
 
@@ -254,14 +286,14 @@ def _configured_text(items: Any) -> str:
 def _error_lines(data: dict[str, Any]) -> list[str]:
     lines: list[str] = []
     if data.get("error_type") or data.get("error"):
-        lines.extend(["", "## Errors"])
+        lines.extend(["", tr('## Errors')])
         if data.get("error_type"):
-            lines.append(f"- Type: `{data.get('error_type')}`")
+            lines.append(tr('- Type: `{0}`', data.get('error_type')))
         if data.get("error"):
-            lines.append(f"- Message: {data.get('error')}")
+            lines.append(tr('- Message: {0}', data.get('error')))
     parameter_errors = data.get("config_parameter_errors") or []
     for error in parameter_errors:
-        lines.append(f"- Config: {error}")
+        lines.append(tr('- Config: {0}', error))
     return lines
 
 
@@ -279,14 +311,14 @@ def _error_summary(data: dict[str, Any]) -> str:
 
 def _result_title(item: Any, index: int) -> str:
     if not isinstance(item, dict):
-        return f"Result {index}"
+        return tr('Result {0}', index)
     return (
         item.get("title")
         or item.get("id")
         or item.get("library_id")
         or item.get("url")
         or item.get("provider")
-        or f"Result {index}"
+        or tr('Result {0}', index)
     )
 
 
@@ -325,93 +357,191 @@ def _search_timeout_lines(data: dict[str, Any]) -> list[str]:
     timeout_seconds = data.get("timeout_seconds")
     if timeout_seconds is not None:
         try:
-            lines.append(f"Search budget: {_format_seconds(float(timeout_seconds))} seconds")
+            lines.append(tr('Search budget: {0} seconds', _format_seconds(float(timeout_seconds))))
         except (TypeError, ValueError):
             pass
     if data.get("timeout_phase"):
-        lines.append(f"Timeout phase: `{data.get('timeout_phase')}`")
+        lines.append(tr('Timeout phase: `{0}`', data.get('timeout_phase')))
     if data.get("partial_success"):
-        lines.append("Partial success: YES")
+        lines.append(tr('Partial success: YES'))
     if data.get("timeout_warning"):
-        lines.append(f"Timeout warning: {data.get('timeout_warning')}")
+        lines.append(tr('Timeout warning: {0}', data.get('timeout_warning')))
     return lines
+
+
+def _provider_notice_lines(data: dict[str, Any]) -> list[str]:
+    """Render degraded optional providers once instead of repeating raw attempts.
+
+    A provider that is already on cooldown is only worth a line when the answer
+    itself failed. Repeating a known-down channel on every successful search is
+    the noise this notice exists to replace; `providers status` and the JSON
+    payload still carry it.
+    """
+    notices = data.get("provider_notices") or []
+    if not notices:
+        return []
+    include_cooldown = not data.get("ok", False)
+    parts: list[str] = []
+    for notice in notices:
+        if not isinstance(notice, dict):
+            continue
+        provider = notice.get("provider", "")
+        label = notice.get("error_type") or notice.get("status") or "failed"
+        if notice.get("status") == "cooldown":
+            if not include_cooldown:
+                continue
+            remaining = _format_seconds(float(notice.get("cooldown_remaining_seconds") or 0.0))
+            parts.append(tr('{0} (cooldown {1}s, {2})', provider, remaining, label))
+        else:
+            parts.append(f"{provider} ({label})")
+    if not parts:
+        return []
+    return ["", tr('> Degraded providers: {0}. `smart-search providers status` for details.', ', '.join(parts))]
 
 
 def _format_result_markdown(command: str, data: dict[str, Any], title: str) -> str:
     lines = [
         f"# {title}",
         "",
-        f"Status: {_status_label(data.get('ok'))}",
+        tr('Status: {0}', _status_label(data.get('ok'))),
     ]
     if data.get("query"):
-        lines.append(f"Query: `{data.get('query')}`")
+        lines.append(tr('Query: `{0}`', data.get('query')))
     if data.get("url"):
-        lines.append(f"URL: {data.get('url')}")
+        lines.append(tr('URL: {0}', data.get('url')))
     if data.get("base_url"):
-        lines.append(f"Base URL: {data.get('base_url')}")
+        lines.append(tr('Base URL: {0}', data.get('base_url')))
     if data.get("provider"):
-        lines.append(f"Provider: {data.get('provider')}")
+        lines.append(tr('Provider: {0}', data.get('provider')))
     if data.get("tool"):
-        lines.append(f"Tool: `{data.get('tool')}`")
+        lines.append(tr('Tool: `{0}`', data.get('tool')))
     if data.get("elapsed_ms") is not None:
-        lines.append(f"Elapsed: {_latency_text(data.get('elapsed_ms'))}")
+        lines.append(tr('Elapsed: {0}', _latency_text(data.get('elapsed_ms'))))
 
     results = data.get("results") or []
     lines.append("")
     if results:
-        lines.append("## Results")
-        lines.extend(_markdown_table(["#", "Title", "URL / ID", "Summary"], _result_rows(results)))
+        lines.append(tr('## Results'))
+        lines.extend(
+            _markdown_table(
+                ["#", "Title", "URL / ID", "Summary"],
+                _result_rows(results),
+                exact_headers={"URL / ID"},
+            )
+        )
     elif data.get("content"):
-        lines.append("## Content")
+        lines.append(tr('## Content'))
         lines.extend(_markdown_code_block(data.get("content")))
     elif data.get("ok"):
-        lines.append("No results.")
+        lines.append(tr('No results.'))
     lines.extend(_error_lines(data))
+    return "\n".join(lines).strip() + "\n"
+
+
+def _format_providers_markdown(data: dict[str, Any]) -> str:
+    if "results" in data:
+        rows = [
+            [
+                item.get("provider", ""),
+                item.get("status", ""),
+                item.get("probe", ""),
+                f"{item.get('response_time_ms', 0)}",
+                _one_line(item.get("message", "") or "-", 80),
+            ]
+            for item in (data.get("results") or [])
+        ]
+        return "\n".join(
+            [
+                tr('# Provider Connection Test'),
+                "",
+                tr('Status: {0}', _status_label(data.get('ok'))),
+                "",
+                *_markdown_table(["Provider", "Status", "Probe", "ms", "Message"], rows),
+            ]
+        ).strip() + "\n"
+    if data.get("error"):
+        lines = [tr('# Provider Health'), "", tr('Status: {0}', _status_label(data.get('ok')))]
+        lines.extend(_error_lines(data))
+        return "\n".join(lines).strip() + "\n"
+    if "cleared" in data:
+        cleared = data.get("cleared") or []
+        return "\n".join(
+            [
+                tr('# Provider Health Reset'),
+                "",
+                tr('Status: {0}', _status_label(data.get('ok'))),
+                tr('Cleared: ') + (", ".join(str(item) for item in cleared) if cleared else tr('no cooldown was active')),
+            ]
+        ).strip() + "\n"
+    lines = [
+        tr('# Provider Health'),
+        "",
+        tr('Cooldown: {0} ({1} seconds after {2} consecutive soft failures)', 'enabled' if data.get('enabled') else 'disabled', _format_seconds(float(data.get('cooldown_seconds') or 0.0)), data.get('failure_threshold', '')),
+        tr('Store: `{0}`', data.get('store_path', '')),
+    ]
+    rows = [
+        [
+            item.get("provider", ""),
+            _yes_no(item.get("configured")),
+            item.get("state", ""),
+            item.get("consecutive_failures", 0),
+            item.get("error_type", "") or "-",
+            _format_seconds(float(item.get("cooldown_remaining_seconds") or 0.0)),
+            _one_line(item.get("error", "") or "-", 80),
+        ]
+        for item in data.get("providers") or []
+        if isinstance(item, dict)
+    ]
+    table = _markdown_table(
+        ["Provider", "Configured", "State", "Failures", "Error type", "Cooldown left (s)", "Last error"],
+        rows,
+    )
+    lines.extend(["", *table] if table else ["", tr('No provider is configured or tracked.')])
     return "\n".join(lines).strip() + "\n"
 
 
 def _format_doctor_markdown(data: dict[str, Any]) -> str:
     lines = [
-        "# Smart Search Doctor",
+        tr('# Smart Search Doctor'),
         "",
-        f"Overall: {_status_label(data.get('ok'))}",
-        f"Config file: `{data.get('config_file', '')}`",
-        f"Config dir: `{data.get('config_dir', '')}`",
-        f"Config dir source: `{data.get('config_dir_source', '-')}`",
-        f"Default config file: `{data.get('default_config_file', '')}`",
-        f"Config status: {data.get('config_status', '-')}",
-        f"Minimum profile: {_status_label(data.get('minimum_profile_ok'))}",
-        f"Log dir config value: `{data.get('log_dir_config_value', data.get('SMART_SEARCH_LOG_DIR', ''))}`",
-        f"Resolved log dir: `{data.get('resolved_log_dir', '')}`",
-        f"File logging enabled: {_yes_no(data.get('file_logging_enabled'))}",
+        tr('Overall: {0}', _status_label(data.get('ok'))),
+        tr('Config file: `{0}`', data.get('config_file', '')),
+        tr('Config dir: `{0}`', data.get('config_dir', '')),
+        tr('Config dir source: `{0}`', data.get('config_dir_source', '-')),
+        tr('Default config file: `{0}`', data.get('default_config_file', '')),
+        tr('Config status: {0}', data.get('config_status', '-')),
+        tr('Minimum profile: {0}', _status_label(data.get('minimum_profile_ok'))),
+        tr('Log dir config value: `{0}`', data.get('log_dir_config_value', data.get('SMART_SEARCH_LOG_DIR', ''))),
+        tr('Resolved log dir: `{0}`', data.get('resolved_log_dir', '')),
+        tr('File logging enabled: {0}', _yes_no(data.get('file_logging_enabled'))),
     ]
     if data.get("openai_compatible_endpoint"):
-        lines.append(f"OpenAI-compatible endpoint: `{data.get('openai_compatible_endpoint')}`")
+        lines.append(tr('OpenAI-compatible endpoint: `{0}`', data.get('openai_compatible_endpoint')))
     if data.get("legacy_windows_config_file"):
-        lines.append(f"Legacy Windows config file: `{data.get('legacy_windows_config_file')}`")
-        lines.append(f"Legacy Windows config exists: {_status_label(data.get('legacy_windows_config_exists'))}")
+        lines.append(tr('Legacy Windows config file: `{0}`', data.get('legacy_windows_config_file')))
+        lines.append(tr('Legacy Windows config exists: {0}', _status_label(data.get('legacy_windows_config_exists'))))
     if data.get("config_dir_override_value"):
-        lines.append(f"SMART_SEARCH_CONFIG_DIR: `{data.get('config_dir_override_value')}`")
-        lines.append(f"Override matches default: {_yes_no(data.get('config_dir_override_matches_default'))}")
+        lines.append(tr('SMART_SEARCH_CONFIG_DIR: `{0}`', data.get('config_dir_override_value')))
+        lines.append(tr('Override matches default: {0}', _yes_no(data.get('config_dir_override_matches_default'))))
         if data.get("config_dir_source") == "environment" and data.get("config_dir_override_matches_default"):
             lines.append(
-                "The active config path comes from `SMART_SEARCH_CONFIG_DIR`, but that override matches the current Windows default path."
+                tr('The active config path comes from `SMART_SEARCH_CONFIG_DIR`, but that override matches the current Windows default path.')
             )
     if data.get("config_dir_source") == "legacy_windows_home":
         lines.append(
-            "Active config is using the old Windows `~\\.config\\smart-search` location because the new default file does not exist."
+            tr('Active config is using the old Windows `~\\.config\\smart-search` location because the new default file does not exist.')
         )
     missing = data.get("minimum_profile_missing") or []
     if missing:
-        lines.append(f"Missing: `{', '.join(str(item) for item in missing)}`")
+        lines.append(tr('Missing: `{0}`', ', '.join((str(item) for item in missing))))
 
     config_sources = data.get("config_sources") or {}
     if config_sources:
         rows = []
         for key in sorted(config_sources):
             rows.append([key, config_sources.get(key), data.get(key, "-")])
-        lines.extend(["", "## Configuration Values"])
-        lines.extend(_markdown_table(["Key", "Source", "Value"], rows))
+        lines.extend(["", tr('## Configuration Values')])
+        lines.extend(_markdown_table(["Key", "Source", "Value"], rows, exact_headers={"Value"}))
 
     capability_status = data.get("capability_status") or {}
     if capability_status:
@@ -427,8 +557,36 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
                     ]
                 )
         if rows:
-            lines.extend(["", "## Capabilities"])
+            lines.extend(["", tr('## Capabilities')])
             lines.extend(_markdown_table(["Capability", "Status", "Configured", "Fallback chain"], rows))
+
+    provider_health = data.get("provider_health") or {}
+    health_rows = [
+        [
+            item.get("provider", ""),
+            item.get("state", ""),
+            item.get("consecutive_failures", 0),
+            item.get("error_type", "") or "-",
+            _format_seconds(float(item.get("cooldown_remaining_seconds") or 0.0)),
+            _one_line(item.get("error", "") or "-", 80),
+        ]
+        for item in provider_health.get("providers") or []
+        if isinstance(item, dict) and item.get("state") == "cooldown"
+    ]
+    if health_rows:
+        lines.extend(
+            [
+                "",
+                tr('## Providers On Cooldown'),
+                tr('These optional providers are skipped until the cooldown ends. Fix the credential, or run `smart-search providers reset PROVIDER` to retry immediately.'),
+            ]
+        )
+        lines.extend(
+            _markdown_table(
+                ["Provider", "State", "Failures", "Error type", "Cooldown left (s)", "Last error"],
+                health_rows,
+            )
+        )
 
     main_tests = data.get("main_search_connection_tests") or {}
     if main_tests:
@@ -443,27 +601,27 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
                         test.get("message", ""),
                     ]
                 )
-        lines.extend(["", "## Main Search Providers"])
+        lines.extend(["", tr('## Main Search Providers')])
         lines.extend(_markdown_table(["Provider", "Status", "Latency", "Message"], rows))
-        lines.extend(_provider_detail_lines("Provider Details", main_tests))
+        lines.extend(_provider_detail_lines(tr('Provider Details'), main_tests))
     inventory = data.get("openai_compatible_fallback_inventory") or {}
     if inventory:
         lines.extend(
             [
                 "",
-                "## OpenAI-compatible Fallback Models",
+                tr('## OpenAI-compatible Fallback Models'),
                 "",
-                f"- Status: {_status_label(inventory.get('status'))}",
-                f"- Timeout policy: `{inventory.get('timeout_policy', 'remaining_budget')}`",
-                f"- Message: {inventory.get('message', '-')}",
+                tr('- Status: {0}', _status_label(inventory.get('status'))),
+                tr('- Timeout policy: `{0}`', inventory.get('timeout_policy', 'remaining_budget')),
+                tr('- Message: {0}', inventory.get('message', '-')),
             ]
         )
         fallback_models = inventory.get("fallback_models") or []
         if fallback_models:
-            lines.append("- Configured: `" + "`, `".join(str(item) for item in fallback_models) + "`")
+            lines.append(tr('- Configured: `') + "`, `".join(str(item) for item in fallback_models) + "`")
         unknown = inventory.get("unknown_fallback_models") or []
         if unknown:
-            lines.append("- Unknown: `" + "`, `".join(str(item) for item in unknown) + "`")
+            lines.append(tr('- Unknown: `') + "`, `".join(str(item) for item in unknown) + "`")
 
     provider_tests = [
         ("exa", data.get("exa_connection_test") or {}),
@@ -471,6 +629,9 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
         ("keenable", data.get("keenable_connection_test") or {}),
         ("jina", data.get("jina_connection_test") or {}),
         ("firecrawl", data.get("firecrawl_connection_test") or {}),
+        ("tinyfish", data.get("tinyfish_connection_test") or {}),
+        ("deepseek", data.get("deepseek_connection_test") or {}),
+        ("yuanbao", data.get("yuanbao_connection_test") or {}),
         ("zhipu", data.get("zhipu_connection_test") or {}),
         ("doubao", data.get("doubao_connection_test") or {}),
         ("zhipu-mcp", data.get("zhipu_mcp_connection_test") or {}),
@@ -488,42 +649,27 @@ def _format_doctor_markdown(data: dict[str, Any]) -> str:
                 ]
             )
     if rows:
-        lines.extend(["", "## Provider Checks"])
+        lines.extend(["", tr('## Provider Checks')])
         lines.extend(_markdown_table(["Provider", "Status", "Latency", "Message"], rows))
-        lines.extend(_provider_detail_lines("Provider Check Details", dict(provider_tests)))
+        lines.extend(_provider_detail_lines(tr('Provider Check Details'), dict(provider_tests)))
 
     router = data.get("intent_router_status") or {}
     if router:
-        lines.extend(["", "## Intent Router"])
+        lines.extend(["", tr('## Intent Router')])
         lines.extend(
             _markdown_table(
                 ["Field", "Value"],
                 [
                     ["mode", router.get("mode", "")],
-                    ["embeddings_configured", _yes_no(router.get("embeddings_configured"))],
-                    ["classifier_configured", _yes_no(router.get("classifier_configured"))],
-                    ["embedding_model", router.get("embedding_model", "")],
-                    ["embedding_threshold", router.get("embedding_threshold", "")],
-                    ["embedding_margin", router.get("embedding_margin", "")],
-                    ["embedding_threshold_source", router.get("embedding_threshold_source", "")],
-                    ["embedding_margin_source", router.get("embedding_margin_source", "")],
-                    ["embedding_preset", router.get("embedding_preset_id", "")],
-                    ["embedding_preset_threshold", router.get("embedding_preset_threshold", "")],
-                    ["embedding_preset_margin", router.get("embedding_preset_margin", "")],
-                    ["embedding_preset_recommended", _yes_no(router.get("embedding_preset_recommended"))],
-                    ["classifier_model", router.get("classifier_model", "")],
+                    ["jev_configured", _yes_no(router.get("configured"))],
+                    ["model", router.get("model", "")],
                     ["timeout_seconds", router.get("timeout_seconds", "")],
                     ["degrades_to_rules", _yes_no(router.get("degrades_to_rules"))],
                 ],
             )
         )
-        if router.get("embedding_preset_recommendation"):
-            lines.extend(["", "### Embedding Preset Recommendation", "", router.get("embedding_preset_recommendation")])
-            commands = router.get("embedding_preset_commands") or []
-            if commands:
-                lines.extend(_markdown_code_block("\n".join(str(command) for command in commands)))
         if router.get("error"):
-            lines.append(f"Intent router error: {router.get('error')}")
+            lines.append(tr('Intent router error: {0}', router.get('error')))
 
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
@@ -548,15 +694,15 @@ def _provider_detail_lines(title: str, provider_tests: dict[str, Any]) -> list[s
                 "",
                 f"### {provider}",
                 "",
-                f"- Status: {_status_label(test.get('status'))}",
-                f"- Latency: {_latency_text(test.get('response_time_ms'))}",
+                tr('- Status: {0}', _status_label(test.get('status'))),
+                tr('- Latency: {0}', _latency_text(test.get('response_time_ms'))),
             ]
         )
         if message:
-            details.extend(["- Message:"])
+            details.extend([tr('- Message:')])
             details.extend(_markdown_code_block(message))
         if available_models:
-            details.append("- Available models: `" + "`, `".join(str(model) for model in available_models) + "`")
+            details.append(tr('- Available models: `') + "`, `".join(str(model) for model in available_models) + "`")
         for name, nested in nested_checks:
             if not isinstance(nested, dict):
                 continue
@@ -579,11 +725,11 @@ def _format_smoke_markdown(data: dict[str, Any]) -> str:
     skipped = data.get("skipped_cases") or []
     overall_status = data.get("status") or ("healthy" if data.get("ok") else "failed")
     lines = [
-        "# Smart Search Smoke",
+        tr('# Smart Search Smoke'),
         "",
-        f"Mode: `{data.get('mode', '')}`",
-        f"Overall: {_status_label(overall_status)}",
-        f"Cases: {len(cases)} total, {len(failed)} failed, {len(degraded)} degraded, {len(skipped)} skipped",
+        tr('Mode: `{0}`', data.get('mode', '')),
+        tr('Overall: {0}', _status_label(overall_status)),
+        tr('Cases: {0} total, {1} failed, {2} degraded, {3} skipped', len(cases), len(failed), len(degraded), len(skipped)),
     ]
     if cases:
         rows = []
@@ -596,7 +742,7 @@ def _format_smoke_markdown(data: dict[str, Any]) -> str:
                     case.get("error") or case.get("error_type") or case.get("skipped", ""),
                 ]
             )
-        lines.extend(["", "## Cases"])
+        lines.extend(["", tr('## Cases')])
         lines.extend(_markdown_table(["Case", "Status", "Severity", "Details"], rows))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
@@ -604,29 +750,29 @@ def _format_smoke_markdown(data: dict[str, Any]) -> str:
 
 def _format_diagnose_markdown(data: dict[str, Any]) -> str:
     lines = [
-        "# Smart Search Diagnose",
+        tr('# Smart Search Diagnose'),
         "",
-        f"Provider: `{data.get('provider', '')}`",
-        f"Status: {_status_label(data.get('ok'))}",
-        f"Summary: {data.get('summary', '-')}",
-        f"Recommendation: {data.get('recommendation', '-')}",
-        f"Config file: `{data.get('config_file', '')}`",
-        f"Config dir source: `{data.get('config_dir_source', '-')}`",
-        f"API URL: `{data.get('api_url', '')}`",
-        f"API key: `{data.get('api_key', '')}`",
-        f"Model: `{data.get('model', '')}`",
-        f"Configured API mode: `{data.get('configured_api_mode', 'chat-completions')}`",
-        f"Endpoint: `{data.get('endpoint', '')}`",
-        f"Configured stream: {_yes_no(data.get('configured_stream'))}",
-        f"Timeout: {_format_seconds(float(data.get('timeout_seconds', 0) or 0))} seconds",
-        f"Timeout policy: `{data.get('timeout_policy', 'remaining_budget')}`",
+        tr('Provider: `{0}`', data.get('provider', '')),
+        tr('Status: {0}', _status_label(data.get('ok'))),
+        tr('Summary: {0}', data.get('summary', '-')),
+        tr('Recommendation: {0}', data.get('recommendation', '-')),
+        tr('Config file: `{0}`', data.get('config_file', '')),
+        tr('Config dir source: `{0}`', data.get('config_dir_source', '-')),
+        tr('API URL: `{0}`', data.get('api_url', '')),
+        tr('API key: `{0}`', data.get('api_key', '')),
+        tr('Model: `{0}`', data.get('model', '')),
+        tr('Configured API mode: `{0}`', data.get('configured_api_mode', 'chat-completions')),
+        tr('Endpoint: `{0}`', data.get('endpoint', '')),
+        tr('Configured stream: {0}', _yes_no(data.get('configured_stream'))),
+        tr('Timeout: {0} seconds', _format_seconds(float(data.get('timeout_seconds', 0) or 0))),
+        tr('Timeout policy: `{0}`', data.get('timeout_policy', 'remaining_budget')),
     ]
     inventory = data.get("fallback_model_inventory") or {}
     if inventory:
-        lines.append("Fallback models: `" + ", ".join(str(item) for item in (inventory.get("fallback_models") or []) or ["-"]) + "`")
+        lines.append(tr('Fallback models: `') + ", ".join(str(item) for item in (inventory.get("fallback_models") or []) or ["-"]) + "`")
         unknown = inventory.get("unknown_fallback_models") or []
         if unknown:
-            lines.append("Unknown fallback models: `" + ", ".join(str(item) for item in unknown) + "`")
+            lines.append(tr('Unknown fallback models: `') + ", ".join(str(item) for item in unknown) + "`")
     checks = data.get("checks") or []
     if checks:
         rows = []
@@ -642,10 +788,10 @@ def _format_diagnose_markdown(data: dict[str, Any]) -> str:
                     check.get("message", ""),
                 ]
             )
-        lines.extend(["", "## Checks"])
+        lines.extend(["", tr('## Checks')])
         lines.extend(_markdown_table(["Check", "Status", "Latency", "HTTP", "Content-Type", "Has content", "Message"], rows))
     if data.get("next_command"):
-        lines.extend(["", "## Next Command"])
+        lines.extend(["", tr('## Next Command')])
         lines.extend(_markdown_code_block(data.get("next_command")))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
@@ -653,182 +799,121 @@ def _format_diagnose_markdown(data: dict[str, Any]) -> str:
 
 def _format_route_markdown(data: dict[str, Any]) -> str:
     lines = [
-        "# Intent Route",
+        tr('# Intent Route'),
         "",
-        f"Status: {_status_label(data.get('ok'))}",
-        f"Query: `{data.get('query', '')}`",
-        f"Mode: `{data.get('intent_router_mode', '')}`",
-        f"Executed search: {_yes_no(data.get('executed_search'))}",
-        f"Required capabilities: `{', '.join(data.get('required_capabilities') or [])}`",
-        f"Confidence: `{data.get('confidence', '')}`",
-        f"Engines: `{', '.join(data.get('router_engines_used') or [])}`",
-        f"Embedding model: `{data.get('embedding_model', '')}`",
-        f"Embedding threshold: `{data.get('embedding_threshold', '')}` ({data.get('embedding_threshold_source', '')})",
-        f"Embedding margin: `{data.get('embedding_margin', '')}` ({data.get('embedding_margin_source', '')})",
-        f"Degraded: {_yes_no(data.get('degraded'))}",
+        tr('Status: {0}', _status_label(data.get('ok'))),
+        tr('Query: `{0}`', data.get('query', '')),
+        tr('Mode: `{0}`', data.get('intent_router_mode', '')),
+        tr('Executed search: {0}', _yes_no(data.get('executed_search'))),
+        tr('Required capabilities: `{0}`', ', '.join(data.get('required_capabilities') or [])),
+        tr('Confidence: `{0}`', data.get('confidence', '')),
+        tr('Engines: `{0}`', ', '.join(data.get('router_engines_used') or [])),
+        tr('Degraded: {0}', _yes_no(data.get('degraded'))),
     ]
-    if data.get("embedding_preset_recommendation"):
-        lines.extend(["", "## Embedding Preset Recommendation", "", data.get("embedding_preset_recommendation")])
-        commands = data.get("embedding_preset_commands") or []
-        if commands:
-            lines.extend(_markdown_code_block("\n".join(str(command) for command in commands)))
     if data.get("degraded_reason"):
-        lines.append(f"Degraded reason: {data.get('degraded_reason')}")
+        lines.append(tr('Degraded reason: {0}', data.get('degraded_reason')))
+    if data.get("intent_router_mode") == "jev":
+        lines.append(tr('Selected channels: ') + ", ".join(item["id"] for item in data.get("selected_channels", [])))
     reasons = data.get("reasons") or []
     if reasons:
-        lines.extend(["", "## Reasons"])
+        lines.extend(["", tr('## Reasons')])
         for reason in reasons:
             lines.append(f"- {reason}")
     signals = data.get("intent_signals") or {}
     if signals:
         rows = [[key, value] for key, value in sorted(signals.items())]
-        lines.extend(["", "## Signals"])
+        lines.extend(["", tr('## Signals')])
         lines.extend(_markdown_table(["Signal", "Value"], rows))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
 
 def _format_route_calibrate_markdown(data: dict[str, Any]) -> str:
-    lines = [
-        "# Route Calibration",
-        "",
-        f"Status: {_status_label(data.get('ok'))}",
-        f"Primary metric: `{data.get('primary_metric', data.get('metric', ''))}`",
-        f"Dataset size: `{data.get('dataset_size', '')}`",
-        f"Recommended model: `{data.get('recommended_model') or '-'}`",
-        f"Recommended threshold: `{data.get('recommended_threshold') if data.get('recommended_threshold') is not None else '-'}`",
-        f"Recommended margin: `{data.get('recommended_margin') if data.get('recommended_margin') is not None else '-'}`",
-    ]
-    results = data.get("model_results") or []
-    if results:
-        rows = []
-        for item in results:
-            rows.append(
-                [
-                    item.get("model", ""),
-                    _status_label(item.get("ok")),
-                    item.get("dimension", ""),
-                    _latency_text(item.get("latency_ms")),
-                    item.get("semantic_macro_f1", ""),
-                    item.get("full_route_macro_f1", ""),
-                    item.get("recommended_threshold", ""),
-                    item.get("recommended_margin", ""),
-                    item.get("error", ""),
-                ]
-            )
-        lines.extend(["", "## Models"])
-        lines.extend(
-            _markdown_table(
-                ["Model", "Status", "Dim", "Latency", "Semantic F1", "Full-route F1", "Threshold", "Margin", "Error"],
-                rows,
-            )
-        )
-    failed = data.get("failed_models") or []
-    if failed:
-        lines.extend(["", "## Failed Models"])
-        for model in failed:
-            lines.append(f"- `{model}`")
-    best = next((item for item in results if item.get("model") == data.get("recommended_model")), None)
-    if isinstance(best, dict):
-        failures = best.get("semantic_failures") or []
-        if failures:
-            lines.extend(["", "## Representative Semantic Failures"])
-            rows = []
-            for failure in failures[:8]:
-                rows.append(
-                    [
-                        failure.get("id", ""),
-                        failure.get("expected", ""),
-                        failure.get("predicted", ""),
-                        failure.get("top_capability", ""),
-                        failure.get("top_score", ""),
-                        failure.get("margin", ""),
-                        failure.get("query", ""),
-                    ]
-                )
-            lines.extend(_markdown_table(["Case", "Expected", "Predicted", "Top", "Score", "Margin", "Query"], rows))
-    lines.extend(_error_lines(data))
-    return "\n".join(lines).strip() + "\n"
+    return "\n".join([tr('# Route Calibration'), "", *_error_lines(data)]).strip() + "\n"
 
 
 def _format_config_markdown(data: dict[str, Any]) -> str:
-    lines = ["# Smart Search Config", "", f"Status: {_status_label(data.get('ok'))}"]
+    lines = [tr('# Smart Search Config'), "", tr('Status: {0}', _status_label(data.get('ok')))]
     if data.get("config_file"):
-        lines.append(f"Config file: `{data.get('config_file')}`")
+        lines.append(tr('Config file: `{0}`', data.get('config_file')))
     if data.get("config_dir"):
-        lines.append(f"Config dir: `{data.get('config_dir')}`")
+        lines.append(tr('Config dir: `{0}`', data.get('config_dir')))
     if data.get("config_dir_source"):
-        lines.append(f"Config dir source: `{data.get('config_dir_source')}`")
+        lines.append(tr('Config dir source: `{0}`', data.get('config_dir_source')))
     if data.get("default_config_file"):
-        lines.append(f"Default config file: `{data.get('default_config_file')}`")
+        lines.append(tr('Default config file: `{0}`', data.get('default_config_file')))
     if data.get("legacy_windows_config_file"):
-        lines.append(f"Legacy Windows config file: `{data.get('legacy_windows_config_file')}`")
-        lines.append(f"Legacy Windows config exists: {_status_label(data.get('legacy_windows_config_exists'))}")
+        lines.append(tr('Legacy Windows config file: `{0}`', data.get('legacy_windows_config_file')))
+        lines.append(tr('Legacy Windows config exists: {0}', _status_label(data.get('legacy_windows_config_exists'))))
     if data.get("config_dir_override_value"):
-        lines.append(f"SMART_SEARCH_CONFIG_DIR: `{data.get('config_dir_override_value')}`")
-        lines.append(f"Override matches default: {_yes_no(data.get('config_dir_override_matches_default'))}")
+        lines.append(tr('SMART_SEARCH_CONFIG_DIR: `{0}`', data.get('config_dir_override_value')))
+        lines.append(tr('Override matches default: {0}', _yes_no(data.get('config_dir_override_matches_default'))))
     if "exists" in data:
-        lines.append(f"Exists: {_status_label(bool(data.get('exists')))}")
+        lines.append(tr('Exists: {0}', _status_label(bool(data.get('exists')))))
     if data.get("key"):
-        lines.append(f"Key: `{data.get('key')}`")
+        lines.append(tr('Key: `{0}`', data.get('key')))
     if data.get("value"):
-        lines.append(f"Value: `{data.get('value')}`")
+        lines.append(tr('Value: `{0}`', data.get('value')))
     values = data.get("values") or {}
     if values:
-        lines.extend(["", "## Values"])
-        lines.extend(_markdown_table(["Key", "Value"], [[key, value] for key, value in values.items()]))
+        lines.extend(["", tr('## Values')])
+        lines.extend(_markdown_table(["Key", "Value"], [[key, value] for key, value in values.items()], exact_headers={"Value"}))
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
 
 def _format_model_markdown(data: dict[str, Any]) -> str:
-    lines = ["# Smart Search Model", "", f"Status: {_status_label(data.get('ok'))}"]
+    lines = [tr('# Smart Search Model'), "", tr('Status: {0}', _status_label(data.get('ok')))]
     rows = []
     if data.get("xai_model"):
         rows.append(["xai-responses", data.get("xai_model")])
+    if "xai_stream" in data:
+        rows.append([tr('xai-responses stream'), "true" if data["xai_stream"] else "false"])
     if data.get("openai_compatible_model"):
         rows.append(["openai-compatible", data.get("openai_compatible_model")])
     if data.get("openai_compatible_api_mode"):
-        rows.append(["openai-compatible API mode", data.get("openai_compatible_api_mode")])
+        rows.append([tr('openai-compatible API mode'), data.get("openai_compatible_api_mode")])
+    if data.get("openai_compatible_tools"):
+        rows.append([tr('openai-compatible tools'), ", ".join(data["openai_compatible_tools"])])
     fallback_models = data.get("openai_compatible_fallback_models") or []
     if fallback_models:
-        rows.append(["openai-compatible fallback", ", ".join(fallback_models)])
+        rows.append([tr('openai-compatible fallback'), ", ".join(fallback_models)])
     if data.get("current_model"):
         rows.append(["current", data.get("current_model")])
     if rows:
-        lines.extend(["", "## Models"])
+        lines.extend(["", tr('## Models')])
         lines.extend(_markdown_table(["Provider", "Model"], rows))
     if data.get("config_file"):
-        lines.extend(["", f"Config file: `{data.get('config_file')}`"])
+        lines.extend(["", tr('Config file: `{0}`', data.get('config_file'))])
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
 
 def _format_setup_markdown(data: dict[str, Any]) -> str:
-    lines = ["# Smart Search Setup", "", f"Status: {_status_label(data.get('ok'))}"]
+    lines = [tr('# Smart Search Setup'), "", tr('Status: {0}', _status_label(data.get('ok')))]
     if data.get("config_file"):
-        lines.append(f"Config file: `{data.get('config_file')}`")
+        lines.append(tr('Config file: `{0}`', data.get('config_file')))
     saved = data.get("saved") or data.get("values") or {}
     if saved:
-        lines.extend(["", "## Saved Values"])
-        lines.extend(_markdown_table(["Key", "Value"], [[key, value] for key, value in saved.items()]))
+        lines.extend(["", tr('## Saved Values')])
+        lines.extend(_markdown_table(["Key", "Value"], [[key, value] for key, value in saved.items()], exact_headers={"Value"}))
     skills = data.get("skills") or {}
     if isinstance(skills, dict) and skills:
         installed = skills.get("installed") or []
         failed = skills.get("failed") or []
-        lines.extend(["", "## Skills", f"Installed: {len(installed)}", f"Failed: {len(failed)}"])
+        lines.extend(["", tr('## Skills'), tr('Installed: {0}', len(installed)), tr('Failed: {0}', len(failed))])
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
 
 def _format_skills_markdown(data: dict[str, Any]) -> str:
-    lines = ["# Smart Search Skills", "", f"Status: {_status_label(data.get('ok'))}"]
+    lines = [tr('# Smart Search Skills'), "", tr('Status: {0}', _status_label(data.get('ok')))]
     if data.get("root"):
-        lines.append(f"Root: `{data.get('root')}`")
+        lines.append(tr('Root: `{0}`', data.get('root')))
     if data.get("skill"):
-        lines.append(f"Skill: `{data.get('skill')}`")
+        lines.append(tr('Skill: `{0}`', data.get('skill')))
     if data.get("bundled_files") is not None:
-        lines.append(f"Bundled files: {data.get('bundled_files')}")
+        lines.append(tr('Bundled files: {0}', data.get('bundled_files')))
 
     targets = data.get("targets") or data.get("installed") or []
     if targets:
@@ -845,8 +930,14 @@ def _format_skills_markdown(data: dict[str, Any]) -> str:
                     item.get("path", ""),
                 ]
             )
-        lines.extend(["", "## Targets"])
-        lines.extend(_markdown_table(["Target", "Status", "Files", "Installed", "Hash match", "Extra", "Path"], rows))
+        lines.extend(["", tr('## Targets')])
+        lines.extend(
+            _markdown_table(
+                ["Target", "Status", "Files", "Installed", "Hash match", "Extra", "Path"],
+                rows,
+                exact_headers={"Path"},
+            )
+        )
     legacy_rows = []
     for item in targets:
         for legacy in item.get("legacy_locations") or []:
@@ -862,13 +953,25 @@ def _format_skills_markdown(data: dict[str, Any]) -> str:
     if legacy_rows:
         lines.extend([
             "",
-            "## Legacy Locations",
-            "Reported read-only; setup and update write only to the canonical target.",
+            tr('## Legacy Locations'),
+            tr('Reported read-only; setup and update write only to the canonical target.'),
         ])
-        lines.extend(_markdown_table(["Target", "Status", "Installed", "Extra", "Path"], legacy_rows))
+        lines.extend(
+            _markdown_table(
+                ["Target", "Status", "Installed", "Extra", "Path"],
+                legacy_rows,
+                exact_headers={"Path"},
+            )
+        )
     if data.get("failed"):
-        lines.extend(["", "## Failed"])
-        lines.extend(_markdown_table(["Target", "Path", "Error"], [[item.get("target"), item.get("path"), item.get("error")] for item in data.get("failed", [])]))
+        lines.extend(["", tr('## Failed')])
+        lines.extend(
+            _markdown_table(
+                ["Target", "Path", "Error"],
+                [[item.get("target"), item.get("path"), item.get("error")] for item in data.get("failed", [])],
+                exact_headers={"Path"},
+            )
+        )
     lines.extend(_error_lines(data))
     return "\n".join(lines).strip() + "\n"
 
@@ -876,28 +979,35 @@ def _format_skills_markdown(data: dict[str, Any]) -> str:
 def _format_markdown(command: str, data: dict[str, Any]) -> str:
     if command == "search":
         if not data.get("ok", False) and (data.get("error") or data.get("error_type")):
-            lines = ["# Smart Search Search", ""]
+            lines = [tr('# Smart Search Search'), ""]
             if data.get("query"):
-                lines.append(f"Query: `{data.get('query')}`")
+                lines.append(tr('Query: `{0}`', data.get('query')))
             if data.get("provider") is not None:
-                lines.append(f"Provider: `{data.get('provider')}`")
+                lines.append(tr('Provider: `{0}`', data.get('provider')))
             if data.get("model") is not None:
-                lines.append(f"Model: `{data.get('model')}`")
+                lines.append(tr('Model: `{0}`', data.get('model')))
             if data.get("stream") is not None:
-                lines.append(f"Stream: {_yes_no(data.get('stream'))}")
+                lines.append(tr('Stream: {0}', _yes_no(data.get('stream'))))
             lines.extend(_search_timeout_lines(data))
             if data.get("content"):
-                lines.extend(["", "## Content"])
+                lines.extend(["", tr('## Content')])
                 lines.extend(_markdown_code_block(data.get("content")))
             if data.get("recommendation"):
-                lines.extend(["", "## Recommendation", str(data.get("recommendation"))])
+                lines.extend(["", tr('## Recommendation'), str(data.get("recommendation"))])
             if data.get("diagnose_command"):
-                lines.extend(["", "## Next Command"])
+                lines.extend(["", tr('## Next Command')])
                 lines.extend(_markdown_code_block(data.get("diagnose_command")))
+            lines.extend(_provider_notice_lines(data))
             lines.extend(_error_lines(data))
             return "\n".join(lines).strip() + "\n"
         lines = [data.get("content", "")]
+        if data.get("primary_api_mode") == "jev":
+            assessment = data.get("evidence_assessment", {})
+            lines.append(tr('\nEvidence: {0}', assessment.get('status', 'unknown')))
+            for warning in data.get("warnings", []):
+                lines.append(tr('Warning: {0}', warning))
         lines.extend(_search_timeout_lines(data))
+        lines.extend(_provider_notice_lines(data))
         primary_sources = data.get("primary_sources") or []
         extra_sources = data.get("extra_sources") or []
         if primary_sources or extra_sources:
@@ -905,25 +1015,25 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
             if warning:
                 lines.append(f"\n> {warning}")
             if primary_sources:
-                lines.append("\n## Primary Sources")
+                lines.append(tr('\n## Primary Sources'))
                 for item in primary_sources:
                     url = item.get("url", "")
-                    title = item.get("title") or item.get("provider") or url
+                    title = item.get("title") or url or item.get("provider")
                     lines.append(f"- [{title}]({url})")
             if extra_sources:
-                lines.append("\n## Extra Sources")
+                lines.append(tr('\n## Extra Sources'))
                 for item in extra_sources:
                     url = item.get("url", "")
-                    title = item.get("title") or item.get("provider") or url
+                    title = item.get("title") or url or item.get("provider")
                     lines.append(f"- [{title}]({url})")
             return "\n".join(lines).strip() + "\n"
 
         sources = data.get("sources") or []
         if sources:
-            lines.append("\n## Sources")
+            lines.append(tr('\n## Sources'))
             for item in sources:
                 url = item.get("url", "")
-                title = item.get("title") or item.get("provider") or url
+                title = item.get("title") or url or item.get("provider")
                 lines.append(f"- [{title}]({url})")
         return "\n".join(lines).strip() + "\n"
     if command == "fetch":
@@ -931,11 +1041,11 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
     if command == "context7-docs":
         content = data.get("content") or ""
         lines = [
-            "# Context7 Docs",
+            tr('# Context7 Docs'),
             "",
-            f"Status: {_status_label(data.get('ok'))}",
-            f"Library: `{data.get('library_id', '')}`",
-            f"Query: `{data.get('query', '')}`",
+            tr('Status: {0}', _status_label(data.get('ok'))),
+            tr('Library: `{0}`', data.get('library_id', '')),
+            tr('Query: `{0}`', data.get('query', '')),
         ]
         if content:
             lines.extend(["", content])
@@ -943,14 +1053,14 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         return "\n".join(lines).strip() + "\n"
     if command == "deep":
         lines = [
-            "# Deep Research Plan",
+            tr('# Deep Research Plan'),
             "",
-            f"**Question:** {data.get('question', '')}",
-            f"**Mode:** {data.get('mode', '')}",
-            f"**Difficulty:** {data.get('difficulty', '')}",
-            f"**Evidence policy:** {data.get('evidence_policy', '')}",
+            tr('**Question:** {0}', data.get('question', '')),
+            tr('**Mode:** {0}', data.get('mode', '')),
+            tr('**Difficulty:** {0}', data.get('difficulty', '')),
+            tr('**Evidence policy:** {0}', data.get('evidence_policy', '')),
             "",
-            "## Boundary",
+            tr('## Boundary'),
         ]
         usage_boundary = data.get("usage_boundary") or {}
         for key in ("search", "deep", "execution"):
@@ -958,18 +1068,18 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
                 lines.append(f"- **{key}:** {usage_boundary[key]}")
         decomposition = data.get("decomposition") or []
         if decomposition:
-            lines.extend(["", "## Decomposition"])
+            lines.extend(["", tr('## Decomposition')])
             for item in decomposition:
                 lines.append(f"- **{item.get('id', '')}:** {item.get('question', '')}")
         steps = data.get("steps") or []
         if steps:
-            lines.extend(["", "## Steps"])
+            lines.extend(["", tr('## Steps')])
             for step in steps:
                 lines.append(f"{step.get('id', '')}. `{step.get('tool', '')}` ({step.get('subquestion_id', '')}) - {step.get('purpose', '')}")
                 lines.append(f"   ```powershell\n   {step.get('command', '')}\n   ```")
         gap_check = data.get("gap_check") or {}
         if gap_check:
-            lines.extend(["", "## Gap Check", gap_check.get("rule", "")])
+            lines.extend(["", tr('## Gap Check'), gap_check.get("rule", "")])
         return "\n".join(lines).strip() + "\n"
     if command == "route":
         return _format_route_markdown(data)
@@ -977,21 +1087,21 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         return _format_route_calibrate_markdown(data)
     if command == "research":
         lines = [
-            "# Research Report",
+            tr('# Research Report'),
             "",
-            f"**Question:** {data.get('question', '')}",
-            f"**Status:** {_status_label(data.get('ok'))}",
-            f"**Route policy:** {data.get('route_policy_version', '')}",
-            f"**Evidence dir:** `{data.get('evidence_dir', '')}`",
-            f"**Fallback used:** {bool(data.get('fallback_used'))}",
-            f"**Degraded:** {bool(data.get('degraded'))}",
+            tr('**Question:** {0}', data.get('question', '')),
+            tr('**Status:** {0}', _status_label(data.get('ok'))),
+            tr('**Route policy:** {0}', data.get('route_policy_version', '')),
+            tr('**Evidence dir:** `{0}`', data.get('evidence_dir', '')),
+            tr('**Fallback used:** {0}', bool(data.get('fallback_used'))),
+            tr('**Degraded:** {0}', bool(data.get('degraded'))),
             "",
-            "## Answer",
+            tr('## Answer'),
             data.get("final_answer") or data.get("content") or "",
         ]
         citations = data.get("citations") or []
         if citations:
-            lines.extend(["", "## Citations"])
+            lines.extend(["", tr('## Citations')])
             for item in citations:
                 url = item.get("url", "")
                 title = item.get("title") or url
@@ -999,7 +1109,7 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
                 lines.append(f"- [{title}]({url})" + (f" ({provider})" if provider else ""))
         gaps = (data.get("gap_check") or {}).get("gaps") or []
         if gaps:
-            lines.extend(["", "## Gaps"])
+            lines.extend(["", tr('## Gaps')])
             for gap in gaps:
                 reason = gap.get("reason", "")
                 url = gap.get("url", "")
@@ -1019,6 +1129,8 @@ def _format_markdown(command: str, data: dict[str, Any]) -> str:
         return _format_setup_markdown(data)
     if command == "skills":
         return _format_skills_markdown(data)
+    if command == "providers":
+        return _format_providers_markdown(data)
     titles = {
         "map": "Site Map",
         "exa-search": "Exa Search",
@@ -1078,46 +1190,42 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
     if command == "route":
         capabilities = ", ".join(data.get("required_capabilities") or []) or "none"
         lines = [
-            f"Intent route {_status_label(data.get('ok'))}: capabilities={capabilities}",
-            f"mode={data.get('intent_router_mode', '')}; confidence={data.get('confidence', '')}; engines={','.join(data.get('router_engines_used') or [])}",
-            f"embedding_model={data.get('embedding_model', '')}; threshold={data.get('embedding_threshold', '')}({data.get('embedding_threshold_source', '')}); margin={data.get('embedding_margin', '')}({data.get('embedding_margin_source', '')})",
+            tr('Intent route {0}: capabilities={1}', _status_label(data.get('ok')), capabilities),
+            tr('mode={0}; confidence={1}; engines={2}', data.get('intent_router_mode', ''), data.get('confidence', ''), ','.join(data.get('router_engines_used') or [])),
         ]
-        if data.get("embedding_preset_recommendation"):
-            lines.append(
-                "embedding_preset_recommendation="
-                f"threshold={data.get('embedding_preset_threshold')} "
-                f"margin={data.get('embedding_preset_margin')}"
-            )
         if data.get("degraded_reason"):
-            lines.append(f"degraded={data.get('degraded_reason')}")
+            lines.append(tr('degraded={0}', data.get('degraded_reason')))
         if data.get("error"):
-            lines.append(f"Error: {_error_summary(data)}")
+            lines.append(tr('Error: {0}', _error_summary(data)))
         return "\n".join(lines).strip() + "\n"
     if command == "route-calibrate":
-        results = data.get("model_results") or []
-        ok_count = sum(1 for item in results if item.get("ok"))
-        lines = [
-            f"Route calibration {_status_label(data.get('ok'))}: {ok_count}/{len(results)} models calibrated",
-            f"primary_metric={data.get('primary_metric', data.get('metric', ''))}; dataset={data.get('dataset_size', '')}",
-        ]
-        if data.get("recommended_model"):
-            lines.append(
-                "recommended="
-                f"{data.get('recommended_model')} "
-                f"threshold={data.get('recommended_threshold')} "
-                f"margin={data.get('recommended_margin')}"
-            )
-        if data.get("failed_models"):
-            lines.append("failed=" + ",".join(str(item) for item in data.get("failed_models") or []))
-        if data.get("error"):
-            lines.append(f"Error: {_error_summary(data)}")
-        return "\n".join(lines).strip() + "\n"
+        return (_error_summary(data) or tr('旧向量路由校准已退役，不调用模型。')) + "\n"
     if command == "deep" or data.get("mode") == "deep_research":
         lines = [
-            f"Deep Research plan for: {data.get('question', '')}",
-            "This command only plans; execute the listed CLI steps to perform live research.",
+            tr('Deep Research plan for: {0}', data.get('question', '')),
+            tr('This command only plans; execute the listed CLI steps to perform live research.'),
         ]
         return "\n".join(lines) + "\n"
+    if command == "providers":
+        if "results" in data:
+            lines = [
+                f"{item.get('provider', '')}: {item.get('status', '')} - {_one_line(item.get('message', '') or '-', 100)}"
+                for item in (data.get("results") or [])
+            ]
+            return "\n".join(lines) + "\n" if lines else tr('No provider tested\n')
+        if data.get("error"):
+            return tr('Providers {0}: {1}\n', _status_label(data.get('ok')), _error_summary(data))
+        if "cleared" in data:
+            cleared = data.get("cleared") or []
+            return (
+                tr('Providers reset {0}: ', _status_label(data.get('ok')))
+                + (", ".join(str(item) for item in cleared) if cleared else tr('no cooldown to clear'))
+                + "\n"
+            )
+        cooling = data.get("cooldown_providers") or []
+        tracked = data.get("providers") or []
+        summary = ", ".join(str(item) for item in cooling) if cooling else "none"
+        return tr('Provider health: {0} tracked, cooldown={1}\n', len(tracked), summary)
     if command == "doctor":
         configured = data.get("capability_status", {})
         capability_bits = []
@@ -1125,29 +1233,30 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
             if isinstance(status, dict):
                 capability_bits.append(f"{name}={_status_label(status.get('ok'))}")
         lines = [
-            f"Doctor {_status_label(data.get('ok'))}: {data.get('config_status', '')}".strip(),
-            f"Minimum profile: {_status_label(data.get('minimum_profile_ok'))}",
+            tr('Doctor {0}: {1}', _status_label(data.get('ok')), data.get('config_status', '')).strip(),
+            tr('Minimum profile: {0}', _status_label(data.get('minimum_profile_ok'))),
         ]
         if capability_bits:
-            lines.append("Capabilities: " + ", ".join(capability_bits))
+            lines.append(tr('Capabilities: ') + ", ".join(capability_bits))
         router = data.get("intent_router_status") or {}
-        if router.get("embedding_preset_recommendation"):
+        cooling = (data.get("provider_health") or {}).get("cooldown_providers") or []
+        if cooling:
             lines.append(
-                "Embedding preset recommendation: "
-                f"threshold={router.get('embedding_preset_threshold')} "
-                f"margin={router.get('embedding_preset_margin')}"
+                tr('Providers on cooldown: ')
+                + ", ".join(str(item) for item in cooling)
+                + " (`smart-search providers status`)"
             )
         if data.get("error"):
-            lines.append(f"Error: {_error_summary(data)}")
+            lines.append(tr('Error: {0}', _error_summary(data)))
         return "\n".join(lines).strip() + "\n"
     if command == "diagnose":
         lines = [
-            f"Diagnose {data.get('provider', '')} {_status_label(data.get('ok'))}: {data.get('summary', '')}".strip(),
+            tr('Diagnose {0} {1}: {2}', data.get('provider', ''), _status_label(data.get('ok')), data.get('summary', '')).strip(),
         ]
         if data.get("recommendation"):
-            lines.append(f"Recommendation: {data.get('recommendation')}")
+            lines.append(tr('Recommendation: {0}', data.get('recommendation')))
         if data.get("error"):
-            lines.append(f"Error: {_error_summary(data)}")
+            lines.append(tr('Error: {0}', _error_summary(data)))
         return "\n".join(lines).strip() + "\n"
     if command == "smoke":
         cases = data.get("cases") or []
@@ -1156,52 +1265,51 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
         skipped = data.get("skipped_cases") or []
         status = data.get("status") or ("healthy" if data.get("ok") else "failed")
         return (
-            f"Smoke {data.get('mode', '')} {_status_label(status)}: {len(cases)} cases, "
-            f"{len(failed)} failed, {len(degraded)} degraded, {len(skipped)} skipped\n"
+            tr('Smoke {0} {1}: {2} cases, {3} failed, {4} degraded, {5} skipped\n', data.get('mode', ''), _status_label(status), len(cases), len(failed), len(degraded), len(skipped))
         )
     if command == "config":
-        parts = [f"Config {_status_label(data.get('ok'))}"]
+        parts = [tr('Config {0}', _status_label(data.get('ok')))]
         if data.get("config_file"):
-            parts.append(f"file={data.get('config_file')}")
+            parts.append(tr('file={0}', data.get('config_file')))
         if data.get("config_dir_source"):
-            parts.append(f"source={data.get('config_dir_source')}")
+            parts.append(tr('source={0}', data.get('config_dir_source')))
         if data.get("config_dir_override_value"):
-            parts.append(f"override={data.get('config_dir_override_value')}")
+            parts.append(tr('override={0}', data.get('config_dir_override_value')))
         if data.get("key"):
-            parts.append(f"key={data.get('key')}")
+            parts.append(tr('key={0}', data.get('key')))
         if data.get("value"):
-            parts.append(f"value={data.get('value')}")
+            parts.append(tr('value={0}', data.get('value')))
         values = data.get("values") or {}
         if values:
-            parts.append(f"values={len(values)}")
+            parts.append(tr('values={0}', len(values)))
         if data.get("error"):
-            parts.append(f"error={_error_summary(data)}")
+            parts.append(tr('error={0}', _error_summary(data)))
         return "; ".join(parts) + "\n"
     if command == "model":
         if data.get("error"):
-            return f"Model {_status_label(data.get('ok'))}: {_error_summary(data)}\n"
+            return tr('Model {0}: {1}\n', _status_label(data.get('ok')), _error_summary(data))
         rows = []
         if data.get("xai_model"):
-            rows.append(f"xai-responses={data.get('xai_model')}")
+            rows.append(tr('xai-responses={0}', data.get('xai_model')))
         if data.get("openai_compatible_model"):
-            rows.append(f"openai-compatible={data.get('openai_compatible_model')}")
+            rows.append(tr('openai-compatible={0}', data.get('openai_compatible_model')))
         if data.get("current_model"):
-            rows.append(f"current={data.get('current_model')}")
-        return ("Models: " + ", ".join(rows) if rows else f"Model {_status_label(data.get('ok'))}") + "\n"
+            rows.append(tr('current={0}', data.get('current_model')))
+        return (tr('Models: ') + ", ".join(rows) if rows else tr('Model {0}', _status_label(data.get('ok')))) + "\n"
     if command == "setup":
         if data.get("error"):
-            return f"Setup {_status_label(data.get('ok'))}: {_error_summary(data)}\n"
+            return tr('Setup {0}: {1}\n', _status_label(data.get('ok')), _error_summary(data))
         saved = data.get("saved") or data.get("values") or {}
-        return f"Setup {_status_label(data.get('ok'))}: {len(saved)} values saved\n"
+        return tr('Setup {0}: {1} values saved\n', _status_label(data.get('ok')), len(saved))
     if command == "skills":
         if data.get("error"):
-            return f"Skills {_status_label(data.get('ok'))}: {_error_summary(data)}\n"
+            return tr('Skills {0}: {1}\n', _status_label(data.get('ok')), _error_summary(data))
         targets = data.get("targets") or data.get("installed") or []
         counts = data.get("status_counts") or {}
         if counts:
             summary = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
-            return f"Skills {_status_label(data.get('ok'))}: {summary}\n"
-        return f"Skills {_status_label(data.get('ok'))}: {len(targets)} targets\n"
+            return tr('Skills {0}: {1}\n', _status_label(data.get('ok')), summary)
+        return tr('Skills {0}: {1} targets\n', _status_label(data.get('ok')), len(targets))
     if command in {
         "map",
         "exa-search",
@@ -1226,7 +1334,7 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
     }:
         lines = _plain_result_lines(data)
         if data.get("error"):
-            lines.append(f"Error: {_error_summary(data)}")
+            lines.append(tr('Error: {0}', _error_summary(data)))
         return "\n".join(lines).strip() + "\n"
     if data.get("error"):
         return f"{_status_label(data.get('ok'))}: {_error_summary(data)}\n"
@@ -1234,6 +1342,7 @@ def _format_content(command: str, data: dict[str, Any]) -> str:
 
 
 def _render(command: str, data: dict[str, Any], fmt: str) -> str:
+    data = render_messages(data)
     if fmt == "content":
         return _format_content(command, data)
     if fmt == "markdown":
@@ -1314,6 +1423,7 @@ def _exit_code(data: dict[str, Any]) -> int:
 
 
 def _print_result(command: str, data: dict[str, Any], fmt: str, output: str = "") -> int:
+    activity.result(data)
     rendered = _render(command, data, fmt)
     if output:
         service.write_output(output, rendered)
@@ -1323,6 +1433,12 @@ def _print_result(command: str, data: dict[str, Any], fmt: str, output: str = ""
     if rendered and not rendered.endswith("\n"):
         _write_stdout("\n")
     return _exit_code(data)
+
+
+def _add_stream_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--stream", dest="stream", action="store_true", default=None, help="Use stream=true for xAI Responses or OpenAI-compatible main search.")
+    group.add_argument("--no-stream", dest="stream", action="store_false", help="Force stream=false for xAI Responses or OpenAI-compatible main search.")
 
 
 def _add_format_args(parser: argparse.ArgumentParser) -> None:
@@ -1336,9 +1452,9 @@ def _parse_json_object_arg(value: str, option_name: str) -> dict[str, Any] | Non
     try:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{option_name} must be a JSON object: {exc.msg}") from exc
+        raise ValueError(tr('{0} must be a JSON object: {1}', option_name, exc.msg)) from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{option_name} must be a JSON object")
+        raise ValueError(tr('{0} must be a JSON object', option_name))
     return data
 
 
@@ -1348,9 +1464,9 @@ def _parse_json_array_arg(value: str, option_name: str) -> list[Any] | None:
     try:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{option_name} must be a JSON array: {exc.msg}") from exc
+        raise ValueError(tr('{0} must be a JSON array: {1}', option_name, exc.msg)) from exc
     if not isinstance(data, list):
-        raise ValueError(f"{option_name} must be a JSON array")
+        raise ValueError(tr('{0} must be a JSON array', option_name))
     return data
 
 
@@ -1381,6 +1497,9 @@ def _display_provider(provider: str, lang: str) -> str:
         "tavily": "Tavily",
         "keenable": "Keenable",
         "firecrawl": "Firecrawl",
+        "tinyfish": "TinyFish",
+        "yuanbao": _t(lang, "元宝搜索", "Yuanbao Search"),
+        "deepseek": "DeepSeek",
         "anysearch": "AnySearch",
         "sciverse": "Sciverse",
     }
@@ -1440,98 +1559,6 @@ def _normalize_doubao_api_url(url: str) -> str:
 
 def _normalize_jina_reader_api_url(url: str) -> str:
     return _normalize_custom_base_url(url)
-
-
-def _config_value_source(key: str) -> str:
-    getter = getattr(service.config, "get_config_source", None)
-    if callable(getter):
-        return str(getter(key))
-    return "default"
-
-
-def _current_config_value(key: str, current: dict[str, str]) -> str:
-    value = str(current.get(key, "") or "")
-    if value:
-        return value
-    if key == "INTENT_EMBEDDING_API_URL":
-        return str(getattr(service.config, "intent_embedding_api_url", "") or "")
-    if key == "INTENT_EMBEDDING_THRESHOLD":
-        try:
-            return str(getattr(service.config, "intent_embedding_threshold", "") or "")
-        except ValueError:
-            return ""
-    if key == "INTENT_EMBEDDING_MARGIN":
-        try:
-            return str(getattr(service.config, "intent_embedding_margin", "") or "")
-        except ValueError:
-            return ""
-    return ""
-
-
-def _matches_float_text(value: str, expected: str) -> bool:
-    try:
-        return abs(float(str(value).strip()) - float(expected)) < 0.0005
-    except (TypeError, ValueError):
-        return False
-
-
-def _apply_embedding_setup_preset(
-    values: dict[str, str],
-    current: dict[str, str],
-    *,
-    interactive: bool,
-    lang: str,
-) -> list[str]:
-    warnings: list[str] = []
-    merged = _merge_setup_values(current, values)
-    model = merged.get("INTENT_EMBEDDING_MODEL", "")
-    preset = embedding_preset_for_model(model)
-    if not preset:
-        return warnings
-
-    for key, preset_value in (
-        ("INTENT_EMBEDDING_API_URL", preset.api_url),
-        ("INTENT_EMBEDDING_THRESHOLD", preset.threshold),
-        ("INTENT_EMBEDDING_MARGIN", preset.margin),
-    ):
-        if values.get(key):
-            continue
-        source = _config_value_source(key)
-        current_value = _current_config_value(key, current)
-        if source == "default" or not current_value:
-            values[key] = preset_value
-            continue
-        if key == "INTENT_EMBEDDING_API_URL":
-            matches = current_value.rstrip("/") == preset_value
-        else:
-            matches = _matches_float_text(current_value, preset_value)
-        if not matches:
-            warning = (
-                f"{key} is currently {current_value}; recommended for {preset.model} is {preset_value}."
-            )
-            warnings.append(warning)
-            if interactive:
-                _write_stderr(
-                    _t(
-                        lang,
-                        f"提示: {warning}\n",
-                        f"Note: {warning}\n",
-                    )
-                )
-    return warnings
-
-
-def _has_embedding_setup_values(values: dict[str, str]) -> bool:
-    return any(
-        bool(values.get(key))
-        for key in (
-            "INTENT_EMBEDDING_API_URL",
-            "INTENT_EMBEDDING_API_KEY",
-            "INTENT_EMBEDDING_MODEL",
-            "INTENT_EMBEDDING_THRESHOLD",
-            "INTENT_EMBEDDING_MARGIN",
-        )
-    )
 
 
 def _is_tavily_hikari_key(api_key: str) -> bool:
@@ -1631,7 +1658,7 @@ def _merge_setup_values(current: dict[str, str], values: dict[str, str]) -> dict
 def _write_setup_status(status: dict[str, Any], lang: str, *, final: bool = False) -> None:
     title = _t(lang, "最低配置检查", "Minimum profile check") if final else _t(lang, "当前状态", "Current status")
     _write_stderr(f"\n{title}:\n")
-    required = {"main_search", "docs_search", "web_fetch"}
+    required = set(status.get("required", []))
     labels = {
         "main_search": _t(lang, "main_search 主搜索", "main_search primary search"),
         "docs_search": _t(lang, "docs_search 文档搜索", "docs_search documentation search"),
@@ -1664,7 +1691,7 @@ def _prompt_choice(prompt: str, default: str = "") -> str:
 def _prompt_yes_no(prompt: str, default: bool = False) -> bool:
     default_text = "Y/n" if default else "y/N"
     answer = _prompt_choice(f"{prompt} [{default_text}]: ", "y" if default else "n").strip().lower()
-    return answer in {"y", "yes", "是", "好", "1", "true"}
+    return answer in {"y", "yes", tr('是'), tr('好'), "1", "true"}
 
 
 def _prompt_value(key: str, label: str, current: str = "", optional: bool = False, lang: str = "en") -> str:
@@ -1805,10 +1832,10 @@ def _select_setup_language(lang: str = "") -> str:
     if lang in {"zh", "en"}:
         return lang
     choices = [
-        {"name": "中文", "value": "zh"},
+        {"name": tr('中文'), "value": "zh"},
         {"name": "English", "value": "en"},
     ]
-    answer = _prompt_select("Language / 语言", choices, "zh").strip().lower()
+    answer = _prompt_select(tr('Language / 语言'), choices, "zh").strip().lower()
     if answer in {"en", "english"}:
         return "en"
     return "zh"
@@ -1872,14 +1899,16 @@ def _setup_choice(prompt: str, choices: set[str], default: str) -> str:
 
 
 def _prompt_main_search(values: dict[str, str], current: dict[str, str], lang: str) -> None:
-    status = _setup_status_from_values(_merge_setup_values(current, values))
+    merged = _merge_setup_values(current, values)
+    status = _setup_status_from_values(merged)
     configured = status["main_search"]["configured"]
-    default_selected = configured or ["xai-responses"]
+    jev_mode = service.normalize_router_mode(merged.get("SMART_SEARCH_INTENT_ROUTER") or "jev") == "jev"
+    default_selected = configured or ([] if jev_mode else ["xai-responses"])
     _write_stderr(
         _t(
             lang,
-            "\n[1/3 必选] main_search 主搜索\n用途: 负责综合搜索回答和最终合成。\n推荐: 有 xAI key 选 xai；有中转服务选 openai；两者都配可以同能力兜底。\n",
-            "\n[1/3 Required] main_search primary search\nPurpose: broad search answers and final synthesis.\nRecommended: choose xai for an xAI key, openai for a relay, or both for same-capability fallback.\n",
+            "\n[1/3 按需] main_search 主搜索\n用途: 负责综合搜索回答；深入搜索的结果汇总使用独立配置。\n推荐: 有 xAI key 选 xai；有中转服务选 openai；两者都配可以同能力兜底。\n",
+            "\n[1/3 Optional] main_search primary search\nPurpose: broad search answers; research synthesis uses separate settings.\nRecommended: choose xai for an xAI key, openai for a relay, or both for same-capability fallback.\n",
         )
     )
     selected = _prompt_provider_multi_select(
@@ -1952,8 +1981,8 @@ def _prompt_docs_search(values: dict[str, str], current: dict[str, str], lang: s
     _write_stderr(
         _t(
             lang,
-            "\n[2/3 必选] docs_search 文档搜索\n用途: 查官方文档、SDK、API、框架和库说明。\n推荐: 文档/API/库优先 Context7；官方域名、论文和低噪声发现再配 Exa。\n",
-            "\n[2/3 Required] docs_search documentation search\nPurpose: official docs, SDKs, APIs, frameworks, and library references.\nRecommended: Context7 for docs/API/library intent; Exa for official domains, papers, and low-noise discovery.\n",
+            "\n[2/3 按需] docs_search 文档搜索\n用途: 查官方文档、SDK、API、框架和库说明。\n推荐: 文档/API/库优先 Context7；官方域名、论文和低噪声发现再配 Exa。\n",
+            "\n[2/3 Optional] docs_search documentation search\nPurpose: official docs, SDKs, APIs, frameworks, and library references.\nRecommended: Context7 for docs/API/library intent; Exa for official domains, papers, and low-noise discovery.\n",
         )
     )
     selected = _prompt_provider_multi_select(
@@ -2181,8 +2210,8 @@ def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str
     _write_stderr(
         _t(
             lang,
-            "\n[3/3 必选] web_fetch 网页抓取\n用途: 已知 URL 抓正文；高风险事实核验必须用。\n推荐: Tavily 优先；Jina 需要 key 才算标准配置；Firecrawl 可作为抓取兜底。\n",
-            "\n[3/3 Required] web_fetch page fetch\nPurpose: extract known URLs; required for high-risk fact checks.\nRecommended: Tavily first; Jina requires a key to satisfy standard config; Firecrawl as fetch fallback.\n",
+            "\n[3/3 按需] web_fetch 网页抓取\n用途: 已知 URL 抓正文；高风险事实核验必须用。\n推荐: Tavily 优先；Jina 需要 key 才算标准配置；Firecrawl 可作为抓取兜底。\n",
+            "\n[3/3 Optional] web_fetch page fetch\nPurpose: extract known URLs; required for high-risk fact checks.\nRecommended: Tavily first; Jina requires a key to satisfy standard config; Firecrawl as fetch fallback.\n",
         )
     )
     selected = _prompt_provider_multi_select(
@@ -2191,7 +2220,7 @@ def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str
             "选择 web_fetch provider",
             "Choose web_fetch providers",
         ),
-        ["tavily", "jina", "firecrawl"],
+        ["tavily", "jina", "firecrawl", "tinyfish", "deepseek"],
         default_selected,
         lang,
     )
@@ -2216,6 +2245,20 @@ def _prompt_web_fetch(values: dict[str, str], current: dict[str, str], lang: str
             lang=lang,
         )
         _prompt_firecrawl_api_url(values, current, lang)
+    if "tinyfish" in selected:
+        values["TINYFISH_API_KEY"] = _prompt_value(
+            "TINYFISH_API_KEY",
+            "TinyFish API key",
+            current.get("TINYFISH_API_KEY", ""),
+            lang=lang,
+        )
+    if "deepseek" in selected:
+        values["DEEPSEEK_API_KEY"] = _prompt_value(
+            "DEEPSEEK_API_KEY",
+            "DeepSeek API key",
+            current.get("DEEPSEEK_API_KEY", ""),
+            lang=lang,
+        )
 
 
 def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str], lang: str) -> None:
@@ -2233,9 +2276,11 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         default_selected.append("zhipu")
     if str(current.get("KEENABLE_ENABLED", "")).strip().lower() in {"true", "1", "yes"}:
         default_selected.append("keenable")
+    if current.get("YUANBAO_SECRET_ID") and current.get("YUANBAO_SECRET_KEY"):
+        default_selected.append("yuanbao")
     selected = _prompt_provider_multi_select(
         _t(lang, "选择可选 web_search 增强", "Choose optional web_search reinforcement"),
-        ["doubao", "zhipu", "keenable"],
+        ["doubao", "zhipu", "keenable", "yuanbao"],
         default_selected,
         lang,
     )
@@ -2277,6 +2322,15 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
             optional=True,
             lang=lang,
         )
+    if "yuanbao" in selected:
+        values["YUANBAO_SECRET_ID"] = _prompt_value(
+            "YUANBAO_SECRET_ID", "Yuanbao Search SecretId",
+            current.get("YUANBAO_SECRET_ID", ""), lang=lang,
+        )
+        values["YUANBAO_SECRET_KEY"] = _prompt_value(
+            "YUANBAO_SECRET_KEY", "Yuanbao Search SecretKey",
+            current.get("YUANBAO_SECRET_KEY", ""), lang=lang,
+        )
     if _prompt_yes_no(_t(lang, "是否调整验证/兜底默认值?", "Adjust validation/fallback defaults?"), default=False):
         values["SMART_SEARCH_VALIDATION_LEVEL"] = _prompt_value(
             "SMART_SEARCH_VALIDATION_LEVEL",
@@ -2301,130 +2355,62 @@ def _prompt_optional_enhancements(values: dict[str, str], current: dict[str, str
         )
 
 
-def _has_intent_router_config(values: dict[str, str]) -> bool:
-    keys = {
-        "SMART_SEARCH_INTENT_ROUTER",
-        "INTENT_EMBEDDING_API_URL",
-        "INTENT_EMBEDDING_API_KEY",
-        "INTENT_EMBEDDING_MODEL",
-        "INTENT_EMBEDDING_THRESHOLD",
-        "INTENT_EMBEDDING_MARGIN",
-        "INTENT_CLASSIFIER_API_URL",
-        "INTENT_CLASSIFIER_API_KEY",
-        "INTENT_CLASSIFIER_MODEL",
-        "INTENT_ROUTER_TIMEOUT_SECONDS",
-    }
-    return any(bool(values.get(key)) for key in keys)
-
-
 def _prompt_intent_router(values: dict[str, str], current: dict[str, str], lang: str) -> None:
     merged = _merge_setup_values(current, values)
-    _write_stderr(
-        _t(
-            lang,
-            "\n[可选增强] 智能意图路由\n用途: 先判断问题需要 docs_search、web_search、web_fetch 还是 vertical_search，再进入同能力 provider 兜底。\n说明: rules 永远可本地兜底；hybrid 可额外配置 embeddings 语义路由和 classifier 结构化分类。\n",
-            "\n[Optional] smart intent routing\nPurpose: decide whether a query needs docs_search, web_search, web_fetch, or vertical_search before same-capability provider fallback.\nNote: rules always remain the local fallback; hybrid can add semantic embeddings and structured classifier routing.\n",
-        )
-    )
-    default_configure = _has_intent_router_config(merged)
-    if not _prompt_yes_no(
-        _t(lang, "是否配置/更新智能意图路由?", "Configure or update smart intent routing?"),
-        default=default_configure,
-    ):
+    _write_stderr(_t(lang,
+        "\n普通搜索选路一次；深入搜索按证据缺口继续。Jev 可选，未配置时使用本地路由。\n",
+        "\nSearch selects once; research follows evidence gaps. Jev is optional, with local routing when unavailable.\n"))
+    if not _prompt_yes_no(_t(lang, "是否配置/更新智能意图路由?", "Configure or update smart intent routing?"),
+                          default=bool(merged.get("SMART_SEARCH_INTENT_ROUTER") or merged.get("TYPESAFE_API_KEY"))):
         return
-
-    mode_default = values.get("SMART_SEARCH_INTENT_ROUTER") or current.get("SMART_SEARCH_INTENT_ROUTER") or "hybrid"
-    if mode_default not in {"hybrid", "rules", "off"}:
-        mode_default = "hybrid"
-    mode = _prompt_select(
-        _t(lang, "选择 intent router 模式", "Choose intent router mode"),
-        [
-            {"name": _t(lang, "hybrid: 规则 + embeddings + classifier，缺配置自动降级 rules", "hybrid: rules + embeddings + classifier, degrading to rules when optional config is missing"), "value": "hybrid"},
-            {"name": _t(lang, "rules: 只用本地规则", "rules: local rules only"), "value": "rules"},
-            {"name": _t(lang, "off: 关闭额外意图路由", "off: disable additional intent routing"), "value": "off"},
-        ],
-        mode_default,
-    )
+    raw_mode = merged.get("SMART_SEARCH_INTENT_ROUTER") or "jev"
+    mode_default = service.normalize_router_mode(raw_mode) if raw_mode in service.config._ALLOWED_INTENT_ROUTER_MODES else "jev"
+    mode = _prompt_select(_t(lang, "选择路由方式", "Choose routing"), [
+        {"name": _t(lang, "Jev 自动选路（未配置时本地回退）", "Jev routing with local fallback"), "value": "jev"},
+        {"name": _t(lang, "本地选路（不调用路由模型）", "Local routing (no router model)"), "value": "local"},
+    ], mode_default)
     values["SMART_SEARCH_INTENT_ROUTER"] = mode
-    if mode != "hybrid":
+    if mode == "local":
         return
-
-    if _prompt_yes_no(
-        _t(lang, "配置 embeddings 语义路由?", "Configure embeddings semantic routing?"),
-        default=bool(merged.get("INTENT_EMBEDDING_API_URL") or merged.get("INTENT_EMBEDDING_API_KEY") or merged.get("INTENT_EMBEDDING_MODEL")),
-    ):
-        _write_stderr(
-            _t(
-                lang,
-                "推荐 preset: SiliconFlow + Qwen/Qwen3-Embedding-8B；setup 会自动使用 threshold=0.475、margin=0.053。\n",
-                "Recommended preset: SiliconFlow + Qwen/Qwen3-Embedding-8B; setup will use threshold=0.475 and margin=0.053 automatically.\n",
+    values["TYPESAFE_API_KEY"] = _prompt_value(
+        "TYPESAFE_API_KEY", "TypeSafe API key", merged.get("TYPESAFE_API_KEY", ""), optional=True, lang=lang)
+    if not _prompt_yes_no(_t(lang, "配置深入搜索的过滤与汇总?", "Configure research filtering and synthesis?"), default=False):
+        return
+    values["SMART_SEARCH_JEV_FILTER_RESULTS"] = str(_prompt_yes_no(
+        _t(lang, "深入搜索时过滤无关证据?", "Filter irrelevant evidence during research?"),
+        default=merged.get("SMART_SEARCH_JEV_FILTER_RESULTS", "false").lower() in {"true", "1", "yes", "on"},
+    )).lower()
+    synthesis_default = merged.get("SMART_SEARCH_JEV_SYNTHESIZE", "false").strip().lower()
+    if synthesis_default in {"1", "yes", "on"}:
+        synthesis_default = "true"
+    if synthesis_default not in {"true", "false", "auto"}:
+        synthesis_default = "false"
+    values["SMART_SEARCH_JEV_SYNTHESIZE"] = _prompt_select(
+        _t(lang, "深入搜索汇总方式", "Research synthesis"), [
+            {"name": _t(lang, "false: 直接返回证据", "false: return evidence directly"), "value": "false"},
+            {"name": _t(lang, "auto: 由 Jev 判断是否需要汇总", "auto: let Jev decide whether synthesis is needed"), "value": "auto"},
+            {"name": _t(lang, "true: 使用独立模型汇总", "true: synthesize with the dedicated model"), "value": "true"},
+        ], synthesis_default)
+    if values["SMART_SEARCH_JEV_SYNTHESIZE"] != "false":
+        synthesis_keys = (
+            "SMART_SEARCH_JEV_SYNTHESIS_API_URL", "SMART_SEARCH_JEV_SYNTHESIS_API_KEY",
+            "SMART_SEARCH_JEV_SYNTHESIS_MODEL",
+        )
+        configured = any(merged.get(key) for key in synthesis_keys)
+        if values["SMART_SEARCH_JEV_SYNTHESIZE"] == "true" or _prompt_yes_no(
+            _t(lang, "配置独立汇总模型?", "Configure a dedicated synthesis model?"), default=configured,
+        ):
+            for key, label in (
+                ("SMART_SEARCH_JEV_SYNTHESIS_API_URL", _t(lang, "汇总 API 地址", "Synthesis API URL")),
+                ("SMART_SEARCH_JEV_SYNTHESIS_API_KEY", _t(lang, "汇总 API Key", "Synthesis API key")),
+                ("SMART_SEARCH_JEV_SYNTHESIS_MODEL", _t(lang, "汇总模型", "Synthesis model")),
+            ):
+                values[key] = _prompt_value(key, label, merged.get(key, ""), lang=lang)
+            values["SMART_SEARCH_JEV_SYNTHESIS_API_MODE"] = _prompt_select(
+                _t(lang, "选择汇总接口模式", "Choose synthesis API mode"),
+                [{"name": mode, "value": mode} for mode in ("chat-completions", "responses")],
+                merged.get("SMART_SEARCH_JEV_SYNTHESIS_API_MODE", "chat-completions"),
             )
-        )
-        raw_url = _prompt_value(
-            "INTENT_EMBEDDING_API_URL",
-            _t(
-                lang,
-                f"Embeddings API 地址（推荐: {QWEN3_EMBEDDING_8B_PRESET.api_url}）",
-                f"Embeddings API URL (recommended: {QWEN3_EMBEDDING_8B_PRESET.api_url})",
-            ),
-            current.get("INTENT_EMBEDDING_API_URL", ""),
-            optional=True,
-            lang=lang,
-        )
-        values["INTENT_EMBEDDING_API_URL"] = _normalize_custom_base_url(raw_url)
-        values["INTENT_EMBEDDING_API_KEY"] = _prompt_value(
-            "INTENT_EMBEDDING_API_KEY",
-            "Embeddings API key",
-            current.get("INTENT_EMBEDDING_API_KEY", ""),
-            optional=True,
-            lang=lang,
-        )
-        values["INTENT_EMBEDDING_MODEL"] = _prompt_value(
-            "INTENT_EMBEDDING_MODEL",
-            _t(lang, "Embeddings 模型（推荐: Qwen/Qwen3-Embedding-8B）", "Embeddings model (recommended: Qwen/Qwen3-Embedding-8B)"),
-            current.get("INTENT_EMBEDDING_MODEL", "") or QWEN3_EMBEDDING_8B_PRESET.model,
-            optional=True,
-            lang=lang,
-        )
-
-    if _prompt_yes_no(
-        _t(lang, "配置 classifier 模型路由?", "Configure classifier model routing?"),
-        default=bool(merged.get("INTENT_CLASSIFIER_API_URL") or merged.get("INTENT_CLASSIFIER_API_KEY") or merged.get("INTENT_CLASSIFIER_MODEL")),
-    ):
-        raw_url = _prompt_value(
-            "INTENT_CLASSIFIER_API_URL",
-            _t(
-                lang,
-                "Classifier API 地址（示例: https://api.openai.com/v1/chat/completions）",
-                "Classifier API URL (example: https://api.openai.com/v1/chat/completions)",
-            ),
-            current.get("INTENT_CLASSIFIER_API_URL", ""),
-            optional=True,
-            lang=lang,
-        )
-        values["INTENT_CLASSIFIER_API_URL"] = _normalize_custom_base_url(raw_url)
-        values["INTENT_CLASSIFIER_API_KEY"] = _prompt_value(
-            "INTENT_CLASSIFIER_API_KEY",
-            "Classifier API key",
-            current.get("INTENT_CLASSIFIER_API_KEY", ""),
-            optional=True,
-            lang=lang,
-        )
-        values["INTENT_CLASSIFIER_MODEL"] = _prompt_value(
-            "INTENT_CLASSIFIER_MODEL",
-            _t(lang, "Classifier 模型", "Classifier model"),
-            current.get("INTENT_CLASSIFIER_MODEL", ""),
-            optional=True,
-            lang=lang,
-        )
-
-    values["INTENT_ROUTER_TIMEOUT_SECONDS"] = _prompt_value(
-        "INTENT_ROUTER_TIMEOUT_SECONDS",
-        _t(lang, "Intent router 超时秒数", "Intent router timeout seconds"),
-        current.get("INTENT_ROUTER_TIMEOUT_SECONDS", ""),
-        optional=True,
-        lang=lang,
-    )
 
 
 def _write_setup_keep_note(lang: str) -> None:
@@ -2441,17 +2427,19 @@ def _write_setup_examples(lang: str) -> None:
     _write_stderr(
         _t(
             lang,
-            "\n不知道怎么填: 先配齐 main_search + docs_search + web_fetch。\n"
+            "\n不知道怎么填: 先配置一个检索渠道；深入搜索再按需添加网页读取。\n"
             "  main_search: xAI Responses，或 OpenAI-compatible（示例: https://api.openai.com/v1）\n"
             "  docs_search: 文档/API 优先 Context7；官方域名、论文和低噪声发现再配 Exa。\n"
             "  web_fetch: Tavily 官方地址是 https://api.tavily.com；号池填 https://<host>/api/tavily。\n"
-            "  intent embeddings: 推荐 SiliconFlow + Qwen/Qwen3-Embedding-8B，setup 会自动补 threshold=0.475、margin=0.053。\n"
+            "  路由: 可选 TypeSafe Jev；普通搜索单轮，research 才会按缺口继续。\n"
+            "  jev: 可跳过 main_search；汇总模型单独配置。\n"
             "  key 都填你自己控制台里的；Zhipu / Firecrawl 可以之后再补。\n",
-            "\nIf unsure: first configure main_search + docs_search + web_fetch.\n"
+            "\nIf unsure: configure one retrieval channel; add page reading for research.\n"
             "  main_search: xAI Responses, or OpenAI-compatible (example: https://api.openai.com/v1)\n"
             "  docs_search: Context7 for docs/API first; add Exa for official domains, papers, and low-noise discovery.\n"
             "  web_fetch: official Tavily endpoint is https://api.tavily.com; pooled endpoints use https://<host>/api/tavily.\n"
-            "  intent embeddings: recommended SiliconFlow + Qwen/Qwen3-Embedding-8B; setup auto-fills threshold=0.475 and margin=0.053.\n"
+            "  Routing: optional TypeSafe Jev; search is single-pass and research follows gaps.\n"
+            "  jev: skip main_search; synthesis uses separate settings.\n"
             "  Use keys from your own provider consoles. Zhipu / Firecrawl can be added later.\n",
         )
     )
@@ -2471,8 +2459,8 @@ def _run_guided_setup_prompts(
     _write_panel(
         _t(
             lang,
-            f"\nSmart Search 配置向导\n配置文件: {config_file}\n\n目标: standard 最低可用配置\n操作: 方向键移动，空格勾选，回车确认；API key 输入不显示。\n最低要求: main_search + docs_search + web_fetch 各至少一个 provider。\n",
-            f"\nSmart Search setup wizard\nConfig file: {config_file}\n\nGoal: standard minimum profile\nKeys: move with arrow keys, select with Space, confirm with Enter; API key input is hidden.\nMinimum: at least one provider in each of main_search + docs_search + web_fetch.\n",
+            f"\nSmart Search 配置向导\n配置文件: {config_file}\n\n目标: standard 最低可用配置\n操作: 方向键移动，空格勾选，回车确认；API key 输入不显示。\n最低要求: 至少一个可用检索渠道；Jev 可选。\n",
+            f"\nSmart Search setup wizard\nConfig file: {config_file}\n\nGoal: standard minimum profile\nKeys: move with arrow keys, select with Space, confirm with Enter; API key input is hidden.\nMinimum: one enabled retrieval channel; Jev is optional.\n",
         ),
         lang,
     )
@@ -2523,20 +2511,21 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("OPENAI_COMPATIBLE_MODEL", "OpenAI-compatible model", True),
         ("OPENAI_COMPATIBLE_FALLBACK_MODELS", "OpenAI-compatible fallback models (comma-separated)", True),
         ("OPENAI_COMPATIBLE_API_MODE", "OpenAI-compatible API mode (chat-completions/responses)", True),
+        ("OPENAI_COMPATIBLE_TOOLS", "OpenAI-compatible Responses tools (web_search; needs API mode responses)", True),
         ("OPENAI_COMPATIBLE_STREAM", "OpenAI-compatible stream mode (true/false)", True),
+        ("SMART_SEARCH_JEV_SYNTHESIS_API_URL", "JEV synthesis API URL", True),
+        ("SMART_SEARCH_JEV_SYNTHESIS_API_KEY", "JEV synthesis API key", True),
+        ("SMART_SEARCH_JEV_SYNTHESIS_MODEL", "JEV synthesis model", True),
+        ("SMART_SEARCH_JEV_SYNTHESIS_API_MODE", "JEV synthesis API mode (chat-completions/responses)", True),
         ("SMART_SEARCH_VALIDATION_LEVEL", "Validation level (fast/balanced/strict)", True),
         ("SMART_SEARCH_FALLBACK_MODE", "Fallback mode (auto/off)", True),
         ("SMART_SEARCH_MINIMUM_PROFILE", "Minimum profile (standard/off)", True),
-        ("SMART_SEARCH_INTENT_ROUTER", "Intent router mode (hybrid/rules/off)", True),
-        ("INTENT_EMBEDDING_API_URL", "Intent embedding API URL", True),
-        ("INTENT_EMBEDDING_API_KEY", "Intent embedding API key", True),
-        ("INTENT_EMBEDDING_MODEL", "Intent embedding model", True),
-        ("INTENT_EMBEDDING_THRESHOLD", "Intent embedding threshold (0-1)", True),
-        ("INTENT_EMBEDDING_MARGIN", "Intent embedding margin (0-1)", True),
-        ("INTENT_CLASSIFIER_API_URL", "Intent classifier API URL", True),
-        ("INTENT_CLASSIFIER_API_KEY", "Intent classifier API key", True),
-        ("INTENT_CLASSIFIER_MODEL", "Intent classifier model", True),
-        ("INTENT_ROUTER_TIMEOUT_SECONDS", "Intent router timeout seconds", True),
+        ("SMART_SEARCH_INTENT_ROUTER", "Routing (jev/local)", True),
+        ("TYPESAFE_API_KEY", "TypeSafe API key (optional)", True),
+        ("TYPESAFE_API_URL", "TypeSafe API URL", True),
+        ("TYPESAFE_MODEL", "Jev model", True),
+        ("SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS", "Optional-provider failure cooldown seconds (0 disables)", True),
+        ("SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD", "Consecutive soft failures before cooldown", True),
         ("EXA_API_KEY", "Exa API key", True),
         ("CONTEXT7_API_KEY", "Context7 API key", True),
         ("ZHIPU_API_KEY", "Zhipu API key", True),
@@ -2563,6 +2552,17 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("KEENABLE_TITLE", "Keenable public app title", True),
         ("FIRECRAWL_API_URL", "Firecrawl API URL", True),
         ("FIRECRAWL_API_KEY", "Firecrawl API key", True),
+        ("TINYFISH_API_KEY", "TinyFish API key", True),
+        ("TINYFISH_SEARCH_API_URL", "TinyFish Search API URL", True),
+        ("TINYFISH_FETCH_API_URL", "TinyFish Fetch API URL", True),
+        ("TINYFISH_TIMEOUT_SECONDS", "TinyFish timeout seconds", True),
+        ("YUANBAO_SECRET_ID", "Yuanbao Search SecretId", True),
+        ("YUANBAO_SECRET_KEY", "Yuanbao Search SecretKey", True),
+        ("YUANBAO_API_URL", "Yuanbao Search API URL", True),
+        ("YUANBAO_TIMEOUT_SECONDS", "Yuanbao Search timeout seconds", True),
+        ("DEEPSEEK_API_KEY", "DeepSeek API key", True),
+        ("DEEPSEEK_API_URL", "DeepSeek API URL", True),
+        ("DEEPSEEK_TIMEOUT_SECONDS", "DeepSeek timeout seconds", True),
         ("ANYSEARCH_API_URL", "AnySearch MCP API URL", True),
         ("ANYSEARCH_API_KEY", "AnySearch API key", True),
         ("ANYSEARCH_TIMEOUT_SECONDS", "AnySearch timeout seconds", True),
@@ -2571,7 +2571,7 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         ("SCIVERSE_TIMEOUT_SECONDS", "Sciverse timeout seconds", True),
     ]
     for key, label, optional in prompts:
-        if values[key]:
+        if values.get(key):
             continue
         value = _prompt_value(key, label, current.get(key, ""), optional=optional, lang=lang)
         if key == "TAVILY_API_URL":
@@ -2590,10 +2590,18 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
             value = _normalize_custom_base_url(value)
         elif key == "SCIVERSE_API_URL":
             value = _normalize_custom_base_url(value)
+        elif key in {"TINYFISH_SEARCH_API_URL", "TINYFISH_FETCH_API_URL", "DEEPSEEK_API_URL", "YUANBAO_API_URL"}:
+            value = _normalize_custom_base_url(value)
         values[key] = value
 
 
 async def _run_async(args: argparse.Namespace) -> int:
+    with service.config.snapshot():
+        return await _run_async_impl(args)
+
+
+async def _run_async_impl(args: argparse.Namespace) -> int:
+    activity.progress(args.command)
     if args.command == "search":
         search_kwargs = {
             "platform": args.platform,
@@ -2610,13 +2618,13 @@ async def _run_async(args: argparse.Namespace) -> int:
         data = await service.search(args.query, **search_kwargs)
         return _print_result("search", data, args.format, args.output)
     if args.command == "route":
-        data = await service.route(args.query, validation=args.validation, mode=args.router_mode)
+        data = await service.route(args.query, validation=args.validation, mode=args.router_mode, allow_remote=args.remote)
         return _print_result("route", data, args.format, args.output)
     if args.command == "route-calibrate":
         data = await service.route_calibrate(models=args.models)
         return _print_result("route-calibrate", data, args.format, args.output)
     if args.command == "fetch":
-        data = await service.fetch(args.url)
+        data = await service.fetch(args.url, timeout_seconds=args.timeout)
         return _print_result("fetch", data, args.format, args.output)
     if args.command == "map":
         data = await service.map_site(
@@ -2786,6 +2794,7 @@ async def _run_async(args: argparse.Namespace) -> int:
             budget=args.budget,
             evidence_dir=args.evidence_dir,
             fallback=args.fallback,
+            stream=args.stream,
         )
         return _print_result("research", data, args.format, args.output)
     if args.command == "smoke":
@@ -2800,7 +2809,7 @@ async def _run_async(args: argparse.Namespace) -> int:
             return _print_result("diagnose", data, args.format, args.output)
         return _print_result(
             "diagnose",
-            {"ok": False, "error_type": "parameter_error", "error": f"Unknown diagnose target: {args.diagnose_target}"},
+            {"ok": False, "error_type": "parameter_error", "error": tr('Unknown diagnose target: {0}', args.diagnose_target)},
             args.format,
             args.output,
         )
@@ -2813,7 +2822,7 @@ def _run_model(args: argparse.Namespace) -> int:
     elif args.model_command == "current":
         data = service.current_model()
     else:
-        data = {"ok": False, "error_type": "parameter_error", "error": "Unknown model command"}
+        data = {"ok": False, "error_type": "parameter_error", "error": tr('Unknown model command')}
     return _print_result("model", data, args.format, args.output)
 
 
@@ -2827,8 +2836,75 @@ def _run_config(args: argparse.Namespace) -> int:
     elif args.config_command == "unset":
         data = service.config_unset(args.key)
     else:
-        data = {"ok": False, "error_type": "parameter_error", "error": "Unknown config command"}
+        data = {"ok": False, "error_type": "parameter_error", "error": tr('Unknown config command')}
     return _print_result("config", data, args.format, args.output)
+
+
+async def _run_providers_test(providers: list[str], timeout_seconds: float) -> dict[str, Any]:
+    """Probe the named providers one at a time; each one costs a real API call."""
+    results = []
+    for provider in providers:
+        results.append(
+            await service.test_provider_connection(provider, timeout_seconds=timeout_seconds)
+        )
+    failed = [item for item in results if not item.get("ok")]
+    unknown = [item for item in failed if item.get("error_type") == "parameter_error"]
+    data: dict[str, Any] = {
+        "ok": not failed,
+        "error_type": "parameter_error" if unknown else ("provider_error" if failed else ""),
+        "error": "; ".join(str(item.get("error") or item.get("message") or "") for item in failed),
+        "results": results,
+    }
+    return data
+
+
+def _run_providers(args: argparse.Namespace) -> int:
+    if args.providers_command == "status":
+        data = service.provider_health_status()
+    elif args.providers_command == "reset":
+        data = service.reset_provider_health(list(args.providers) or None)
+    elif args.providers_command == "test":
+        data = asyncio.run(_run_providers_test(list(args.providers), args.timeout))
+    else:
+        data = {"ok": False, "error_type": "parameter_error", "error": tr('Unknown providers command')}
+    return _print_result("providers", data, args.format, args.output)
+
+
+def _default_ui_lang() -> str:
+    """Guess from the locale; the page has a toggle either way, so never prompt."""
+    return current_language()
+
+
+def _run_ui(args: argparse.Namespace) -> int:
+    from . import ui_server
+
+    lang = getattr(args, "lang", "") or _default_ui_lang()
+    if getattr(args, "check", False):
+        # Resolves and reads the bundled page without binding a port, so a packaging
+        # mistake shows up in CI instead of as a 500 for a user.
+        try:
+            page = ui_server.load_page_source()
+        except (OSError, FileNotFoundError, ModuleNotFoundError) as e:
+            data = {"ok": False, "error_type": "runtime_error", "error": tr('UI asset missing: {0}', e)}
+            return _print_result("ui", data, args.format, args.output)
+        data = {"ok": True, "error_type": "", "error": "", "asset_bytes": len(page.encode("utf-8"))}
+        return _print_result("ui", data, args.format, args.output)
+
+    options = ui_server.UIServerConfig(
+        port=getattr(args, "port", 0) or 0,
+        idle_timeout=getattr(args, "idle_timeout", ui_server.DEFAULT_IDLE_TIMEOUT),
+        lang=lang,
+        open_browser=not getattr(args, "no_browser", False),
+    )
+    try:
+        data = ui_server.serve(options, announce=_write_stderr_line)
+    except OSError as e:
+        data = {"ok": False, "error_type": "runtime_error", "error": tr('无法启动本地服务: {0}', e)}
+    return _print_result("ui", data, args.format, args.output)
+
+
+def _write_stderr_line(line: str) -> None:
+    _write_stderr(line + "\n")
 
 
 def _skill_targets_from_args(args: argparse.Namespace) -> list[str]:
@@ -2861,7 +2937,12 @@ def _run_skills(args: argparse.Namespace) -> int:
             data = {"ok": False, "error_type": "runtime_error", "error": str(e), "selected": target_ids}
         return _print_result("skills", data, args.format, args.output)
 
-    data = {"ok": False, "error_type": "parameter_error", "error": "Unknown skills command", "selected": target_ids}
+    if args.skills_command == "remove":
+        from .skill_maintenance import remove
+        data = remove(target_ids, home=args.skills_root or None, env={} if args.skills_root else None)
+        return _print_result("skills", data, args.format, args.output)
+
+    data = {"ok": False, "error_type": "parameter_error", "error": tr('Unknown skills command'), "selected": target_ids}
     return _print_result("skills", data, args.format, args.output)
 
 
@@ -2874,16 +2955,24 @@ def _run_setup(args: argparse.Namespace) -> int:
 
     values = {
         "SMART_SEARCH_TIMEOUT_SECONDS": args.search_timeout,
+        "SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS": args.provider_cooldown,
+        "SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD": args.provider_failure_threshold,
         "XAI_API_URL": args.xai_api_url,
         "XAI_API_KEY": args.xai_api_key,
         "XAI_MODEL": args.xai_model,
         "XAI_TOOLS": args.xai_tools_explicit,
+        "XAI_STREAM": args.xai_stream,
         "OPENAI_COMPATIBLE_API_URL": args.openai_compatible_api_url,
         "OPENAI_COMPATIBLE_API_KEY": args.openai_compatible_api_key,
         "OPENAI_COMPATIBLE_MODEL": args.openai_compatible_model,
         "OPENAI_COMPATIBLE_FALLBACK_MODELS": args.openai_compatible_fallback_models,
         "OPENAI_COMPATIBLE_API_MODE": args.openai_compatible_api_mode,
+        "OPENAI_COMPATIBLE_TOOLS": args.openai_compatible_tools,
         "OPENAI_COMPATIBLE_STREAM": args.openai_compatible_stream,
+        "SMART_SEARCH_JEV_SYNTHESIS_API_URL": args.jev_synthesis_api_url,
+        "SMART_SEARCH_JEV_SYNTHESIS_API_KEY": args.jev_synthesis_api_key,
+        "SMART_SEARCH_JEV_SYNTHESIS_MODEL": args.jev_synthesis_model,
+        "SMART_SEARCH_JEV_SYNTHESIS_API_MODE": args.jev_synthesis_api_mode,
         "SMART_SEARCH_VALIDATION_LEVEL": args.validation_level,
         "SMART_SEARCH_FALLBACK_MODE": args.fallback_mode,
         "SMART_SEARCH_MINIMUM_PROFILE": args.minimum_profile,
@@ -2923,6 +3012,17 @@ def _run_setup(args: argparse.Namespace) -> int:
         "KEENABLE_TITLE": args.keenable_title,
         "FIRECRAWL_API_URL": _normalize_firecrawl_api_url(args.firecrawl_api_url),
         "FIRECRAWL_API_KEY": args.firecrawl_key,
+        "TINYFISH_API_KEY": args.tinyfish_key,
+        "TINYFISH_SEARCH_API_URL": _normalize_custom_base_url(args.tinyfish_search_api_url),
+        "TINYFISH_FETCH_API_URL": _normalize_custom_base_url(args.tinyfish_fetch_api_url),
+        "TINYFISH_TIMEOUT_SECONDS": args.tinyfish_timeout,
+        "YUANBAO_SECRET_ID": args.yuanbao_secret_id,
+        "YUANBAO_SECRET_KEY": args.yuanbao_secret_key,
+        "YUANBAO_API_URL": _normalize_custom_base_url(args.yuanbao_api_url),
+        "YUANBAO_TIMEOUT_SECONDS": args.yuanbao_timeout,
+        "DEEPSEEK_API_KEY": args.deepseek_key,
+        "DEEPSEEK_API_URL": _normalize_custom_base_url(args.deepseek_api_url),
+        "DEEPSEEK_TIMEOUT_SECONDS": args.deepseek_timeout,
         "ANYSEARCH_API_URL": _normalize_custom_base_url(args.anysearch_api_url),
         "ANYSEARCH_API_KEY": args.anysearch_key,
         "ANYSEARCH_TIMEOUT_SECONDS": args.anysearch_timeout,
@@ -2945,29 +3045,33 @@ def _run_setup(args: argparse.Namespace) -> int:
         else:
             skill_targets_for_prompt = selected_skill_targets if not args.skip_skills and not selected_skill_targets else None
             _run_guided_setup_prompts(values, current_for_setup, lang, skill_targets=skill_targets_for_prompt, show_banner=False)
-        if _has_embedding_setup_values(values):
-            setup_warnings.extend(_apply_embedding_setup_preset(values, current_for_setup, interactive=True, lang=lang))
-    else:
-        current_for_setup = service.config_list(show_secrets=True)["values"]
-        if _has_embedding_setup_values(values):
-            setup_warnings.extend(_apply_embedding_setup_preset(values, current_for_setup, interactive=False, lang=lang))
+    if any(values.get(key) for key in service.config.RETIRED_ROUTER_KEYS):
+        setup_warnings.append("Embedding/classifier settings are retained for compatibility but no longer used. No preset was applied.")
 
     # Validate all local enum/numeric constraints before persisting any setup
     # field, so an invalid API mode cannot leave a partial provider profile.
-    for key, value in values.items():
-        if not value:
-            continue
-        try:
-            service.config._validate_config_value(key, value)
-        except ValueError as e:
-            data = {
-                "ok": False,
-                "error_type": "parameter_error",
-                "error": str(e),
-                "config_file": service.config_path()["config_file"],
-                "saved": {},
-            }
-            return _print_result("setup", data, args.format, args.output)
+    def validate_before_saving() -> None:
+        for key, value in values.items():
+            if value:
+                service.config._validate_config_value(key, value)
+        # Tools and API mode are saved one key at a time below, so check the pair up front.
+        if values.get("OPENAI_COMPATIBLE_TOOLS") or values.get("OPENAI_COMPATIBLE_API_MODE"):
+            service.config.check_openai_compatible_tools_mode(
+                values.get("OPENAI_COMPATIBLE_TOOLS") or service.config.openai_compatible_tools_raw,
+                values.get("OPENAI_COMPATIBLE_API_MODE") or service.config._get_config_value("OPENAI_COMPATIBLE_API_MODE", "") or "",
+            )
+
+    try:
+        validate_before_saving()
+    except ValueError as e:
+        data = {
+            "ok": False,
+            "error_type": "parameter_error",
+            "error": str(e),
+            "config_file": service.config_path()["config_file"],
+            "saved": {},
+        }
+        return _print_result("setup", data, args.format, args.output)
 
     saved: dict[str, str] = {}
     for key, value in values.items():
@@ -3005,13 +3109,13 @@ def _run_setup(args: argparse.Namespace) -> int:
         if skill_result is not None:
             _write_skill_install_summary(skill_result, lang)
         _write_setup_status(final_status, lang, final=True)
-        missing = [capability for capability in ("main_search", "docs_search", "web_fetch") if not final_status[capability]["ok"]]
+        missing = service._minimum_profile_result("standard", final_status)["missing"]
         if missing:
             _write_stderr(
                 _t(
                     lang,
-                    "\n当前配置尚未满足 standard 最低配置。\nsearch / doctor 会 fail closed，不会假装可用。\n",
-                    "\nThe current config does not satisfy the standard minimum profile.\nsearch / doctor will fail closed instead of pretending to work.\n",
+                    "\n当前配置尚未满足所选模式的最低配置。\nsearch / doctor 会报告缺失配置。\n",
+                    "\nThe current config does not satisfy the selected mode's minimum profile.\nsearch / doctor will fail closed and report missing configuration.\n",
                 )
             )
         else:
@@ -3036,9 +3140,15 @@ def _run_regression() -> int:
         "tests/test_providers_new.py",
         "tests/test_doubao_provider.py",
         "tests/test_jina_provider.py",
+        "tests/test_tinyfish_provider.py",
+        "tests/test_tinyfish_service.py",
+        "tests/test_yuanbao_provider.py",
+        "tests/test_yuanbao_service.py",
+        "tests/test_deepseek_provider.py",
         "tests/test_zhipu_mcp_provider.py",
         "tests/test_smoke.py",
         "tests/test_intent_router.py",
+        "tests/test_jev.py",
         "tests/test_regression.py",
         "tests/test_release_workflow.py",
     ]
@@ -3062,8 +3172,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--v", "--version", action="version", version=f"%(prog)s {_get_version()}")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=SmartSearchArgumentParser)
 
+    guide = sub.add_parser("agent-guide", help="Read the current CLI instructions for Agents.")
+    guide.add_argument("section", nargs="?", default="SKILL.md")
+
     search_parser = sub.add_parser(
-        "search", aliases=COMMAND_ALIASES["search"], help="Run OpenAI-compatible web search."
+        "search", aliases=COMMAND_ALIASES["search"], help="Run single-pass retrieval through one selected channel."
     )
     search_parser.set_defaults(command="search")
     search_parser.add_argument("query")
@@ -3073,9 +3186,7 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--validation", choices=["fast", "balanced", "strict"], default="")
     search_parser.add_argument("--fallback", choices=["auto", "off"], default="")
     search_parser.add_argument("--providers", default="auto")
-    stream_group = search_parser.add_mutually_exclusive_group()
-    stream_group.add_argument("--stream", dest="stream", action="store_true", default=None, help="Use stream=true for OpenAI-compatible main search.")
-    stream_group.add_argument("--no-stream", dest="stream", action="store_false", help="Force stream=false for OpenAI-compatible main search.")
+    _add_stream_args(search_parser)
     search_parser.add_argument(
         "--timeout",
         type=float,
@@ -3091,9 +3202,10 @@ def build_parser() -> argparse.ArgumentParser:
     route_parser.set_defaults(command="route")
     route_parser.add_argument("query")
     route_parser.add_argument("--validation", choices=["fast", "balanced", "strict"], default="")
+    route_parser.add_argument("--remote", action="store_true", help="Explicitly allow remote routing judgments; may incur API charges. No retrieval is executed.")
     route_parser.add_argument(
         "--router-mode",
-        choices=["hybrid", "rules", "off"],
+        choices=["jev", "local", "hybrid", "rules", "off"],
         default="",
         help="Override SMART_SEARCH_INTENT_ROUTER for this diagnostic call.",
     )
@@ -3102,19 +3214,26 @@ def build_parser() -> argparse.ArgumentParser:
     route_calibrate_parser = sub.add_parser(
         "route-calibrate",
         aliases=COMMAND_ALIASES["route-calibrate"],
-        help="Evaluate embedding intent-routing models and recommend threshold/margin.",
+        help="Retired compatibility command; no remote calibration is performed.",
     )
     route_calibrate_parser.set_defaults(command="route-calibrate")
     route_calibrate_parser.add_argument(
         "--models",
         default="",
-        help="Comma-separated embedding model names. Defaults to known candidates plus the configured model.",
+        help="Ignored compatibility option; remote calibration is retired.",
     )
     _add_format_args(route_calibrate_parser)
 
     fetch_parser = sub.add_parser("fetch", aliases=COMMAND_ALIASES["fetch"], help="Fetch a URL as markdown.")
     fetch_parser.set_defaults(command="fetch")
     fetch_parser.add_argument("url")
+    fetch_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Total fetch budget in seconds; overrides SMART_SEARCH_TIMEOUT_SECONDS.",
+    )
     _add_format_args(fetch_parser)
 
     map_parser = sub.add_parser("map", aliases=COMMAND_ALIASES["map"], help="Map a website structure.")
@@ -3401,6 +3520,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_parser.add_argument("--budget", choices=["quick", "standard", "deep"], default="deep")
     research_parser.add_argument("--evidence-dir", default="")
     research_parser.add_argument("--fallback", choices=["auto", "off"], default="auto")
+    _add_stream_args(research_parser)
     _add_format_args(research_parser)
 
     smoke_parser = sub.add_parser(
@@ -3481,13 +3601,81 @@ def build_parser() -> argparse.ArgumentParser:
         help="Advanced synthetic home-directory override for portable or test installs; defaults to the current user's home directory.",
     )
     _add_format_args(skills_update)
+    skills_remove = skills_sub.add_parser("remove", help="Remove selected Skills, keeping a backup of their files.")
+    skills_remove.set_defaults(skills_command="remove")
+    skills_remove.add_argument("--targets", default=",".join(DEFAULT_SKILL_TARGET_IDS))
+    skills_remove.add_argument("--all", action="store_true")
+    skills_remove.add_argument("--skills-root", default="")
+    _add_format_args(skills_remove)
+
+    providers_parser = sub.add_parser(
+        "providers",
+        aliases=COMMAND_ALIASES["providers"],
+        help="Inspect or clear the persisted failure cooldown for optional providers.",
+    )
+    providers_parser.set_defaults(command="providers")
+    providers_sub = providers_parser.add_subparsers(dest="providers_command", required=True, parser_class=SmartSearchArgumentParser)
+    providers_status = providers_sub.add_parser(
+        "status",
+        aliases=PROVIDERS_COMMAND_ALIASES["status"],
+        help="Show which providers are on cooldown and why.",
+    )
+    providers_status.set_defaults(providers_command="status")
+    _add_format_args(providers_status)
+    providers_reset = providers_sub.add_parser(
+        "reset",
+        aliases=PROVIDERS_COMMAND_ALIASES["reset"],
+        help="Clear cooldowns so the next run retries the provider immediately.",
+    )
+    providers_reset.set_defaults(providers_command="reset")
+    providers_reset.add_argument(
+        "providers",
+        nargs="*",
+        default=[],
+        help="Provider ids to clear, e.g. zhipu zhipu-mcp. Omit to clear every cooldown.",
+    )
+    _add_format_args(providers_reset)
+    providers_test = providers_sub.add_parser(
+        "test",
+        aliases=PROVIDERS_COMMAND_ALIASES["test"],
+        help="Check whether a provider's saved credentials still work. Makes a real API request.",
+    )
+    providers_test.set_defaults(providers_command="test")
+    providers_test.add_argument(
+        "providers",
+        nargs="+",
+        help=f"Provider ids to check, e.g. exa zhipu. Known: {', '.join(sorted(service.PROBE_KIND))}.",
+    )
+    providers_test.add_argument(
+        "--timeout",
+        type=float,
+        default=service.PROBE_TIMEOUT_CEILING,
+        help="Per-provider ceiling in seconds (default: %(default)s).",
+    )
+    _add_format_args(providers_test)
+
+    ui_parser = sub.add_parser(
+        "ui",
+        aliases=UI_COMMAND_ALIASES,
+        help="Open a temporary local page to review configuration and test provider keys.",
+    )
+    ui_parser.set_defaults(command="ui")
+    ui_parser.add_argument("--port", type=int, default=0, help="Port to bind on 127.0.0.1 (default: a free one).")
+    ui_parser.add_argument("--no-browser", action="store_true", help="Print the URL without opening a browser.")
+    ui_parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=900.0,
+        help="Exit after this many idle seconds; 0 keeps it running (default: %(default)s).",
+    )
+    ui_parser.add_argument("--check", action="store_true", help="Verify the bundled page is installed, then exit.")
+    _add_format_args(ui_parser)
 
     setup_parser = sub.add_parser(
         "setup", aliases=COMMAND_ALIASES["setup"], help="Interactively save local provider configuration."
     )
     setup_parser.set_defaults(command="setup")
     setup_parser.add_argument("--non-interactive", action="store_true", help="Only save values passed as flags.")
-    setup_parser.add_argument("--lang", choices=["zh", "en"], default="", help="Interactive setup language.")
     setup_parser.add_argument("--advanced", action="store_true", help="Show every low-level config key in interactive setup.")
     setup_parser.add_argument("--skip-skills", action="store_true", help="Skip user-level smart-search-cli skill installation.")
     setup_parser.add_argument(
@@ -3504,12 +3692,18 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--xai-api-key", default="", help="Save XAI_API_KEY.")
     setup_parser.add_argument("--xai-model", default="", help="Save XAI_MODEL.")
     setup_parser.add_argument("--xai-tools-explicit", default="", help="Save XAI_TOOLS.")
+    setup_parser.add_argument("--xai-stream", default="", help="Save XAI_STREAM.")
     setup_parser.add_argument("--openai-compatible-api-url", default="", help="Save OPENAI_COMPATIBLE_API_URL.")
     setup_parser.add_argument("--openai-compatible-api-key", default="", help="Save OPENAI_COMPATIBLE_API_KEY.")
     setup_parser.add_argument("--openai-compatible-model", default="", help="Save OPENAI_COMPATIBLE_MODEL.")
     setup_parser.add_argument("--openai-compatible-fallback-models", default="", help="Save OPENAI_COMPATIBLE_FALLBACK_MODELS.")
     setup_parser.add_argument("--openai-compatible-api-mode", default="", help="Save OPENAI_COMPATIBLE_API_MODE (chat-completions or responses).")
+    setup_parser.add_argument("--openai-compatible-tools", default="", help="Save OPENAI_COMPATIBLE_TOOLS (web_search or web_search_preview; needs --openai-compatible-api-mode responses).")
     setup_parser.add_argument("--openai-compatible-stream", default="", help="Save OPENAI_COMPATIBLE_STREAM.")
+    setup_parser.add_argument("--jev-synthesis-api-url", default="", help="Save SMART_SEARCH_JEV_SYNTHESIS_API_URL.")
+    setup_parser.add_argument("--jev-synthesis-api-key", default="", help="Save SMART_SEARCH_JEV_SYNTHESIS_API_KEY.")
+    setup_parser.add_argument("--jev-synthesis-model", default="", help="Save SMART_SEARCH_JEV_SYNTHESIS_MODEL.")
+    setup_parser.add_argument("--jev-synthesis-api-mode", default="", help="Save SMART_SEARCH_JEV_SYNTHESIS_API_MODE.")
     setup_parser.add_argument("--validation-level", default="", help="Save SMART_SEARCH_VALIDATION_LEVEL.")
     setup_parser.add_argument("--fallback-mode", default="", help="Save SMART_SEARCH_FALLBACK_MODE.")
     setup_parser.add_argument("--minimum-profile", default="", help="Save SMART_SEARCH_MINIMUM_PROFILE.")
@@ -3521,15 +3715,28 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Save SMART_SEARCH_TIMEOUT_SECONDS.",
     )
-    setup_parser.add_argument("--intent-embedding-api-url", default="", help="Save INTENT_EMBEDDING_API_URL.")
-    setup_parser.add_argument("--intent-embedding-api-key", default="", help="Save INTENT_EMBEDDING_API_KEY.")
-    setup_parser.add_argument("--intent-embedding-model", default="", help="Save INTENT_EMBEDDING_MODEL.")
-    setup_parser.add_argument("--intent-embedding-threshold", default="", help="Save INTENT_EMBEDDING_THRESHOLD.")
-    setup_parser.add_argument("--intent-embedding-margin", default="", help="Save INTENT_EMBEDDING_MARGIN.")
-    setup_parser.add_argument("--intent-classifier-api-url", default="", help="Save INTENT_CLASSIFIER_API_URL.")
-    setup_parser.add_argument("--intent-classifier-api-key", default="", help="Save INTENT_CLASSIFIER_API_KEY.")
-    setup_parser.add_argument("--intent-classifier-model", default="", help="Save INTENT_CLASSIFIER_MODEL.")
-    setup_parser.add_argument("--intent-router-timeout", default="", help="Save INTENT_ROUTER_TIMEOUT_SECONDS.")
+    setup_parser.add_argument("--intent-embedding-api-url", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-embedding-api-key", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-embedding-model", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-embedding-threshold", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-embedding-margin", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-classifier-api-url", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-classifier-api-key", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-classifier-model", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument("--intent-router-timeout", default="", help=argparse.SUPPRESS)
+    setup_parser.add_argument(
+        "--provider-cooldown",
+        "--provider-cooldown-seconds",
+        dest="provider_cooldown",
+        default="",
+        help="Save SMART_SEARCH_PROVIDER_COOLDOWN_SECONDS; 0 disables the optional-provider failure cooldown.",
+    )
+    setup_parser.add_argument(
+        "--provider-failure-threshold",
+        dest="provider_failure_threshold",
+        default="",
+        help="Save SMART_SEARCH_PROVIDER_FAILURE_THRESHOLD.",
+    )
     setup_parser.add_argument("--exa-key", default="", help="Save EXA_API_KEY.")
     setup_parser.add_argument("--context7-key", default="", help="Save CONTEXT7_API_KEY.")
     setup_parser.add_argument("--zhipu-key", default="", help="Save ZHIPU_API_KEY.")
@@ -3556,6 +3763,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--keenable-title", default="", help="Save KEENABLE_TITLE.")
     setup_parser.add_argument("--firecrawl-api-url", default="", help="Save FIRECRAWL_API_URL.")
     setup_parser.add_argument("--firecrawl-key", default="", help="Save FIRECRAWL_API_KEY.")
+    setup_parser.add_argument("--tinyfish-key", default="", help="Save TINYFISH_API_KEY.")
+    setup_parser.add_argument("--tinyfish-search-api-url", default="", help="Save TINYFISH_SEARCH_API_URL.")
+    setup_parser.add_argument("--tinyfish-fetch-api-url", default="", help="Save TINYFISH_FETCH_API_URL.")
+    setup_parser.add_argument("--tinyfish-timeout", default="", help="Save TINYFISH_TIMEOUT_SECONDS.")
+    setup_parser.add_argument("--yuanbao-secret-id", default="", help="Save YUANBAO_SECRET_ID.")
+    setup_parser.add_argument("--yuanbao-secret-key", default="", help="Save YUANBAO_SECRET_KEY.")
+    setup_parser.add_argument("--yuanbao-api-url", default="", help="Save YUANBAO_API_URL.")
+    setup_parser.add_argument("--yuanbao-timeout", default="", help="Save YUANBAO_TIMEOUT_SECONDS.")
+    setup_parser.add_argument("--deepseek-key", default="", help="Save DEEPSEEK_API_KEY.")
+    setup_parser.add_argument("--deepseek-api-url", default="", help="Save DEEPSEEK_API_URL.")
+    setup_parser.add_argument("--deepseek-timeout", default="", help="Save DEEPSEEK_TIMEOUT_SECONDS.")
     setup_parser.add_argument("--anysearch-api-url", default="", help="Save ANYSEARCH_API_URL.")
     setup_parser.add_argument("--anysearch-key", default="", help="Save ANYSEARCH_API_KEY.")
     setup_parser.add_argument("--anysearch-timeout", default="", help="Save ANYSEARCH_TIMEOUT_SECONDS.")
@@ -3589,12 +3807,30 @@ def build_parser() -> argparse.ArgumentParser:
         "regression", aliases=COMMAND_ALIASES["regression"], help="Run offline CLI regression tests."
     )
     regression_parser.set_defaults(command="regression")
+    _localize_parser(parser)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _localize_parser(parser):
+    if parser.description:
+        parser.description = tr(parser.description)
+    for group in parser._action_groups:
+        group.title = tr(group.title)
+    for action in parser._actions:
+        if action.help and action.help != argparse.SUPPRESS:
+            action.help = tr(action.help)
+        if isinstance(action, argparse._SubParsersAction):
+            for choice in action._choices_actions:
+                if choice.help:
+                    choice.help = tr(choice.help)
+            for child in set(action.choices.values()):
+                _localize_parser(child)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    args.lang = resolve(getattr(args, "lang", current_language()))
     try:
         if args.command == "regression":
             return _run_regression()
@@ -3604,11 +3840,114 @@ def main(argv: list[str] | None = None) -> int:
             return _run_skills(args)
         if args.command == "config":
             return _run_config(args)
+        if args.command == "providers":
+            return _run_providers(args)
+        if args.command == "ui":
+            return _run_ui(args)
         if args.command == "model":
             return _run_model(args)
         return asyncio.run(_run_async(args))
     except KeyboardInterrupt:
+        activity.cancelled()
         return EXIT_RUNTIME_ERROR
+
+
+def _desktop_launch_command() -> list[str]:
+    """Argv that starts this same CLI without a shell, e.g. inside WSL from the Windows App."""
+    package_root = os.environ.get("SMART_SEARCH_PACKAGE_ROOT", "")
+    node = os.environ.get("SMART_SEARCH_NODE_PATH", "")
+    wrapper = Path(package_root) / "npm" / "bin" / "smart-search.js"
+    if package_root and node and wrapper.is_file():
+        return [node, str(wrapper)]
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, "-m", "smart_search.cli"]
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments == ["--desktop-backend"]:
+        from .desktop_backend import main as desktop_main
+        return desktop_main()
+    if arguments == ["--desktop-capabilities"]:
+        print(json.dumps({"product": "smart-search", "version": _get_version(), "activity_protocol_version": 1,
+                          "desktop_protocol_version": 1, "skills_protocol_version": 1,
+                          "launch_command": _desktop_launch_command()}))
+        return EXIT_OK
+    try:
+        arguments, language, warning = _command_language(arguments)
+    except ValueError as error:
+        with use_language("auto"):
+            _write_stderr(render_messages(tr(str(error))) + "\n")
+        return EXIT_PARAMETER_ERROR
+    with use_language(language):
+        if arguments[:1] == ["agent-guide"] and not any(arg in {"--help", "-h"} for arg in arguments):
+            from .skill_maintenance import maintain
+            with contextlib.suppress(OSError, ValueError):
+                maintain()
+            from .skill_installer import _load_skill_files
+            files = dict(_load_skill_files())
+            section = arguments[1] if len(arguments) == 2 else "SKILL.md"
+            if len(arguments) > 2 or section not in files or not section.endswith(".md"):
+                _write_stderr("Usage: smart-search agent-guide [" + " | ".join(name for name in files if name.endswith(".md")) + "]\n")
+                return EXIT_PARAMETER_ERROR
+            print(files[section].decode("utf-8"))
+            print("\nRead a referenced document with: smart-search agent-guide <relative-path>")
+            return EXIT_OK
+        if warning:
+            _write_stderr(str(tr(warning)) + "\n")
+        if arguments and arguments[0] not in {"--help", "-h", "--version", "skills"}:
+            from .skill_maintenance import maintain
+            with contextlib.suppress(OSError, ValueError):
+                maintain()
+        return _observed_main(arguments)
+
+
+def _command_language(arguments):
+    """Resolve before argparse handles --help, including flags after a subcommand."""
+    cleaned, explicit, index = [], None, 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--":
+            cleaned.extend(arguments[index:])
+            break
+        if argument == "--lang":
+            if index + 1 == len(arguments):
+                raise ValueError(tr('--lang requires auto, zh, or en.'))
+            explicit = normalize(arguments[index + 1])
+            index += 2
+            continue
+        if argument.startswith("--lang="):
+            explicit = normalize(argument.partition("=")[2])
+        else:
+            cleaned.append(argument)
+        index += 1
+    if explicit is not None:
+        return cleaned, resolve(explicit), ""
+    if LANGUAGE_KEY in os.environ:
+        return cleaned, resolve(os.environ[LANGUAGE_KEY]), ""
+    # Reading the preference must not create a configuration directory for --help.
+    directory, _ = service.config._resolve_config_dir()
+    try:
+        saved = json.loads((directory / "config.json").read_text(encoding="utf-8"))
+        if not isinstance(saved, dict):
+            raise ValueError("config must be an object")
+        preference = saved.get(LANGUAGE_KEY, "auto")
+        return cleaned, resolve(preference), ""
+    except FileNotFoundError:
+        return cleaned, resolve("auto"), ""
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return cleaned, resolve("auto"), "The saved language preference could not be read; using the system language."
+
+
+def _observed_main(arguments):
+    first = arguments[0] if arguments else ""
+    command = next((name for name, aliases in COMMAND_ALIASES.items() if first in [name, *aliases]), "unknown")
+    command = {"--help": "help", "-h": "help", "--version": "version", "ui": "ui", "web": "ui"}.get(first, command)
+    with activity.observe(command, version=_get_version()) as run:
+        code = _main(arguments)
+        run.finish(code)
+        return code
 
 
 if __name__ == "__main__":

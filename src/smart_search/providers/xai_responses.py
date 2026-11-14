@@ -1,6 +1,9 @@
+from ..i18n import source_message
+import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -8,10 +11,10 @@ import httpx
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt
 
 from .base import BaseSearchProvider
-from .openai_compatible import _WaitWithRetryAfter, _is_retryable_exception, get_local_time_info
+from .openai_compatible import OpenAICompatibleSearchProvider, _StopAfterSlowFailure, _StopAtDeadline, _WaitWithRetryAfter, _is_retryable_exception, get_local_time_info
 from ..config import config
 from ..logger import log_info
-from ..url_utils import extract_unique_urls
+from ..provider_errors import ProviderCallError
 from ..utils import search_prompt
 
 
@@ -34,10 +37,38 @@ _INLINE_URL_BRACKET_PAIRS = (
 
 
 class XAIResponsesSearchProvider(BaseSearchProvider):
-    def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast", tools: list[str] | None = None):
+    def __init__(self, api_url: str, api_key: str, model: str = "grok-4-fast", tools: list[str] | None = None,
+                 stream: bool = False, reasoning_effort: str = ""):
         super().__init__(api_url.rstrip("/"), api_key)
         self.model = model
         self.tools = tools or []
+        self.stream = stream
+        self.reasoning_effort = reasoning_effort
+        self._search_deadline_monotonic: float | None = None
+
+    def set_search_deadline(self, deadline_monotonic: float | None) -> None:
+        """Set by the service for one main-search candidate; standalone calls stay unchanged."""
+        self._search_deadline_monotonic = deadline_monotonic
+
+    def _request_timeout(self) -> httpx.Timeout:
+        if self._search_deadline_monotonic is None:
+            return httpx.Timeout(connect=6.0, read=config.search_timeout_or_default, write=10.0, pool=None)
+        remaining = self._search_deadline_monotonic - time.monotonic()
+        if remaining <= 0:
+            raise asyncio.TimeoutError(source_message('main_search deadline exhausted'))
+        bounded = max(0.001, remaining)
+        return httpx.Timeout(
+            connect=min(6.0, bounded),
+            read=bounded,
+            write=min(10.0, bounded),
+            pool=bounded,
+        )
+
+    def _retry_stop(self):
+        stop = stop_after_attempt(config.retry_max_attempts + 1) | _StopAfterSlowFailure(self)
+        if self._search_deadline_monotonic is not None:
+            return stop | _StopAtDeadline(self._search_deadline_monotonic)
+        return stop
 
     def get_provider_name(self) -> str:
         return "xAI Responses"
@@ -58,39 +89,84 @@ class XAIResponsesSearchProvider(BaseSearchProvider):
             _logger.warning("SSL_VERIFY=false: xAI Responses API 请求已禁用 SSL 证书验证，存在安全风险")
         return verify
 
+    def request_options(self) -> dict[str, Any]:
+        """The transport and reasoning fields that searches and connection tests both send."""
+        options: dict[str, Any] = {"stream": self.stream}
+        if self.reasoning_effort:
+            options["reasoning"] = {"effort": self.reasoning_effort}
+        return options
+
+    async def parse_stream(self, response: httpx.Response, ctx=None) -> str:
+        parser = OpenAICompatibleSearchProvider(self.api_url, self.api_key, self.model, api_mode="responses")
+        return await parser._parse_responses_streaming_response(response, ctx)
+
     def _build_search_payload(self, query: str, platform: str = "") -> dict[str, Any]:
         platform_prompt = ""
         if platform:
             platform_prompt = "\n\nYou should search the web for the information you need, and focus on these platform: " + platform + "\n"
         time_context = get_local_time_info() + "\n"
-        payload: dict[str, Any] = {
+        return {
             "model": self.model,
             "instructions": search_prompt,
             "input": [{"role": "user", "content": time_context + query + platform_prompt}],
-            "stream": False,
             "tools": [{"type": tool} for tool in self.tools],
+            **self.request_options(),
         }
-        return payload
 
     async def search(self, query: str, platform: str = "", ctx=None) -> str:
         payload = self._build_search_payload(query, platform)
         await log_info(ctx, f"platform_prompt: {query}", config.debug_enabled)
-        return await self._execute_response_with_retry(self._build_api_headers(), payload, ctx)
+        try:
+            return await self._execute_response_with_retry(self._build_api_headers(), payload, ctx)
+        except httpx.HTTPStatusError as exc:
+            # The default XAI_TOOLS includes x_search, which only xAI serves; other Responses
+            # services (OpenAI, most relays) answer 400. Say which setting to change.
+            if exc.response.status_code == 400 and "x_search" in self.tools and "x_search" in (exc.response.text or ""):
+                host = urlsplit(self.api_url).netloc or self.api_url
+                raise ProviderCallError(
+                    "parameter_error",
+                    source_message('{0} 不支持 XAI_TOOLS 里的 x_search（HTTP 400）。x_search 只有 xAI 官方接口能用；把 XAI_TOOLS 改成 web_search 再试。', host),
+                    additional_secrets=(self.api_key,),
+                ) from exc
+            raise
 
     async def _execute_response_with_retry(self, headers: dict, payload: dict, ctx=None) -> str:
-        timeout = httpx.Timeout(connect=6.0, read=120.0, write=10.0, pool=None)
+        timeout = self._request_timeout()
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, verify=self._get_ssl_verify()) as client:
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(config.retry_max_attempts + 1),
-                wait=_WaitWithRetryAfter(config.retry_multiplier, config.retry_max_wait),
+                stop=self._retry_stop(),
+                wait=_WaitWithRetryAfter(
+                    config.retry_multiplier,
+                    config.retry_max_wait,
+                    deadline_monotonic=self._search_deadline_monotonic,
+                ),
                 retry=retry_if_exception(_is_retryable_exception),
                 reraise=True,
             ):
                 with attempt:
+                    self._attempt_started_at = time.monotonic()
+                    if self.stream:
+                        async with client.stream(
+                            "POST",
+                            f"{self.api_url}/responses",
+                            headers=headers,
+                            json=payload,
+                            timeout=self._request_timeout(),
+                        ) as response:
+                            if response.status_code >= 400:
+                                await response.aread()
+                            response.raise_for_status()
+                            answer = await self.parse_stream(response, ctx)
+                            if answer and not _SERIALIZED_SOURCES_PATTERN.search(answer):
+                                sources = self._extract_inline_urls(answer)
+                                if sources:
+                                    answer = f"{answer}\n\nsources({json.dumps(sources, ensure_ascii=False)})".strip()
+                            return answer
                     response = await client.post(
                         f"{self.api_url}/responses",
                         headers=headers,
                         json=payload,
+                        timeout=self._request_timeout(),
                     )
                     response.raise_for_status()
                     return await self._parse_response(response, ctx)
@@ -137,7 +213,21 @@ class XAIResponsesSearchProvider(BaseSearchProvider):
 
     @staticmethod
     def _extract_inline_urls(text: str) -> list[dict[str, str]]:
-        return [{"url": url} for url in extract_unique_urls(text)]
+        sources: list[dict[str, str]] = []
+        seen: set[str] = set()
+
+        for match in _INLINE_URL_PATTERN.finditer(text):
+            url = XAIResponsesSearchProvider._trim_inline_url_terminal_punctuation(match.group())
+            if not XAIResponsesSearchProvider._is_valid_inline_http_url(url):
+                continue
+            scheme, separator, remainder = url.partition(":")
+            url = f"{scheme.lower()}{separator}{remainder}"
+            if url in seen:
+                continue
+            seen.add(url)
+            sources.append({"url": url})
+
+        return sources
 
     @staticmethod
     def _trim_inline_url_terminal_punctuation(url: str) -> str:

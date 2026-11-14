@@ -1,21 +1,20 @@
-<!-- TRELLIS:START -->
-# Trellis Instructions
+# smart-search
 
-These instructions are for AI assistants working in this project.
+面向 AI 与命令行用户的搜索、网页抓取和研究工具：Python 核心在 `src/smart_search`，npm 入口在 `npm/`，Windows 与 macOS 桌面 App 在 `desktop/`，DSH 包在 `packages/`。产品定位见 `PRODUCT.md`，桌面设计见 `DESIGN.md`，App 与 CLI 的边界见 `docs/app-cli-boundary.md`，桌面协议见 `desktop/PROTOCOL.md`。命令和依赖以 `package.json`、`pyproject.toml`、`mise.toml` 为准，发版说明在 `.github/releases/`。
 
-This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
+<!-- knowledge-sync:start -->
+## CodeStable 与知识同步
 
-- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
-- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
-- `.trellis/workspace/` — per-developer journals and session traces
-- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
+- 入口是 `/cs`。小改走快改并留下 `ff`；纯格式、错别字、依赖版本号这类改动视为"不要痕迹"，不留 `ff`。
+- 现状规格就是 `codestable/spec/`，不另建 ARCHITECTURE.md、GLOSSARY.md；统一语言写在 `codestable/spec/index.md` 和各子层的入口页。
+- 决定（为什么这样选、否掉了什么）写 `.agents/notes/`，格式按 write-notes-like-deepseek，提交前跑 verify；Issue 的方案一节链接过去。`codestable/notes/` 只放坑点和操作经验。
+- 结构路径在 `.arch-check.json`。改了这些目录，同一次提交必须改 `codestable/spec/` 或 `.agents/notes/`，或者在本次 `ff` / Issue 的「codestable」一栏写明影响；pre-commit 会检查，被拒绝时按提示补，不要绕过。
+- `/cs` 的技能文件不在仓里（上游没有许可证）：会话开始时 `.githooks/ensure-cs.mjs` 按固定提交取到 .claude/skills/cs，云端自动装，本地缺了运行它加 --install。`.claude/skills/README.md` 让这个目录随仓存在，Claude Code 才会当场发现装进来的 cs，别删。输入框不认 /cs 时运行 /reload-skills；技能列表里还没有 cs 就直接读 .claude/skills/cs/SKILL.md。
+- 关闭 Issue 或 `ff` 落盘并提交成功后，在仓库目录运行 `board log "<一句话进展>"`。云端会话经 winhand 到 Windows 的检出里运行，加 --evidence 和 PR 链接；没有 winhand 就把这句进展写进 PR 描述。
+<!-- knowledge-sync:end -->
 
-If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
+## 历史与边界
 
-If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
-- `.agents/skills/` — reusable Trellis skills
-- `.codex/agents/` — optional custom subagents
-
-Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
-
-<!-- TRELLIS:END -->
+- 2026-10-31 起本仓试点 CodeStable-Lite 做入口，为期两周；为什么这样选、怎么验收见 `.agents/notes/proposed/process/2026-10-31-codestable-lite-pilot.md`。
+- `.comet/config.yaml` 是以前 Comet 工作流的配置，不路由新工作。v0.1.18 删掉的带点目录 `.trellis/`、`.codestable/` 属于旧工作流，不要恢复；现在的 `codestable/`（不带点）是 Lite 的。
+- `codestable/`、`.githooks/`、`.claude/settings.json`、`.agents/notes/` 只在仓里，不进 npm 包（`package.json` 的 `files` 白名单）。

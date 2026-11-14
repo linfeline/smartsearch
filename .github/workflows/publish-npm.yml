@@ -32,8 +32,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  prepare:
     runs-on: ubuntu-latest
+    env:
+      MISE_DISABLE_TOOLS: dotnet,swift,pipx:dmgbuild,uv,shellcheck,actionlint
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    outputs:
+      skip: ${{ steps.stable-bump.outputs.skip }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      ref: ${{ steps.source.outputs.ref }}
 
     steps:
       - name: Check out repository
@@ -42,22 +50,12 @@ jobs:
           ref: ${{ github.event.inputs.target_ref || github.ref }}
           fetch-depth: 2
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
+      - name: Set up the project toolchain
+        uses: jdx/mise-action@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Install npm package
-        run: npm ci
-
-      - name: Test package
-        run: npm test
+      - name: Record immutable source
+        id: source
+        run: echo "ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Detect stable release bump commit
         id: stable-bump
@@ -113,39 +111,43 @@ jobs:
             echo "Refusing to publish prerelease version $version with npm dist-tag latest." >&2
             exit 1
           fi
-          node npm/scripts/set-package-version.js "$version"
+          mise run node npm/scripts/set-package-version.js "$version"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      - name: Read package metadata
-        id: package
-        if: steps.stable-bump.outputs.skip != 'true'
-        shell: bash
+  binaries:
+    needs: prepare
+    if: needs.prepare.outputs.skip != 'true'
+    uses: ./.github/workflows/npm-binaries.yml
+    with:
+      ref: ${{ needs.prepare.outputs.ref }}
+      version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    needs: [prepare, binaries]
+    runs-on: ubuntu-latest
+    env:
+      MISE_DISABLE_TOOLS: dotnet,swift,pipx:dmgbuild,uv,shellcheck,actionlint
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+      - uses: jdx/mise-action@v4
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: npm-cli-*
+          path: .desktop-artifacts/publish-npm
+          merge-multiple: true
+      - name: Publish platform packages before the CLI entry package
+        env:
+          CLI_VERSION: ${{ needs.prepare.outputs.version }}
+          CLI_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          echo "name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
-          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Check whether this npm version already exists
-        id: npm-version
-        if: steps.stable-bump.outputs.skip != 'true'
-        shell: bash
-        run: |
-          if npm view "${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }}" version >/dev/null 2>&1; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.stable-bump.outputs.skip != 'true' && steps.npm-version.outputs.published != 'true'
-        run: npm publish --access public --provenance --tag "${{ steps.release.outputs.tag }}"
-
-      - name: Skip existing npm version
-        if: steps.stable-bump.outputs.skip != 'true' && steps.npm-version.outputs.published == 'true'
-        run: echo "npm version ${{ steps.package.outputs.name }}@${{ steps.package.outputs.version }} already exists; skipping publish."
+          mise run node npm/scripts/set-package-version.js "$CLI_VERSION"
+          mise run node npm/scripts/publish-binaries.js .desktop-artifacts/publish-npm "$CLI_TAG"
 
       - name: Create or update GitHub release
-        if: steps.stable-bump.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           CREATE_GITHUB_RELEASE: ${{ github.event.inputs.create_github_release }}
@@ -155,16 +157,18 @@ jobs:
             echo "Skipping GitHub release because create_github_release=false."
             exit 0
           fi
-          version="${{ steps.release.outputs.version }}"
-          npm_tag="${{ steps.release.outputs.tag }}"
+          version="${{ needs.prepare.outputs.version }}"
+          npm_tag="${{ needs.prepare.outputs.tag }}"
           tag_name="v${version}"
           target="$(git rev-parse HEAD)"
-          notes_footer="$(printf '\n\n---\n\nnpm package: `%s@%s`\nnpm dist-tag: `%s`\nworkflow run: %s/%s/actions/runs/%s\n' '${{ steps.package.outputs.name }}' "$version" "$npm_tag" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
+          # shellcheck disable=SC2016
+          notes_footer="$(printf '\n\n---\n\nnpm package: `%s@%s`\nnpm dist-tag: `%s`\nworkflow run: %s/%s/actions/runs/%s\n' '@konbakuyomu/smart-search' "$version" "$npm_tag" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID")"
           notes_file=".github/releases/v${version}.md"
           if [[ -f "$notes_file" ]]; then
             notes="$(cat "$notes_file")${notes_footer}"
           else
-            notes="$(printf 'Release notes for `%s@%s`.\n' '${{ steps.package.outputs.name }}' "$version")${notes_footer}"
+            # shellcheck disable=SC2016
+            notes="$(printf 'Release notes for `%s@%s`.\n' '@konbakuyomu/smart-search' "$version")${notes_footer}"
           fi
           create_release_args=()
           edit_release_args=()

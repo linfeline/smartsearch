@@ -1,3 +1,4 @@
+from ..i18n import source_message
 import json
 import time
 from typing import Any
@@ -60,7 +61,7 @@ class JinaReaderProvider:
                     "provider": "jina",
                     "url": url,
                     "error_type": "config_error",
-                    "error": "JINA_RESPOND_WITH requires JINA_API_KEY.",
+                    "error": source_message('JINA_RESPOND_WITH requires JINA_API_KEY.'),
                     "elapsed_ms": _elapsed_ms(start),
                 },
                 ensure_ascii=False,

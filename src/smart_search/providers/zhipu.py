@@ -1,3 +1,4 @@
+from ..i18n import source_message
 import json
 import time
 from typing import Any
@@ -12,6 +13,8 @@ from ..provider_errors import ProviderCallError, classify_provider_exception, sa
 
 
 RETRYABLE_STATUS_CODES = {408, 500, 502, 503, 504}
+# Zhipu reports several failures inside an HTTP 200 body, so the payload has to
+# be classified as well; otherwise a dead key looks like an empty result set.
 AUTH_ERROR_CODES = {"1000", "1001", "1002", "1003", "1004", "1110", "401"}
 RATE_LIMITED_ERROR_CODES = {"1113", "1301", "1302", "1303", "1304", "1305", "429"}
 AUTH_ERROR_KEYWORDS = ("api key", "apikey", "token", "鉴权", "认证", "未授权", "unauthorized", "invalid key")
@@ -42,14 +45,15 @@ def _normalize_result(item: dict[str, Any]) -> dict[str, Any]:
 def _classify_payload_error(code: str, message: str) -> str:
     normalized_code = str(code or "").strip()
     lowered = (message or "").lower()
-    if normalized_code in AUTH_ERROR_CODES or any(k in lowered for k in AUTH_ERROR_KEYWORDS):
+    if normalized_code in AUTH_ERROR_CODES or any(keyword in lowered for keyword in AUTH_ERROR_KEYWORDS):
         return "auth_error"
-    if normalized_code in RATE_LIMITED_ERROR_CODES or any(k in lowered for k in RATE_LIMITED_ERROR_KEYWORDS):
+    if normalized_code in RATE_LIMITED_ERROR_CODES or any(keyword in lowered for keyword in RATE_LIMITED_ERROR_KEYWORDS):
         return "rate_limited"
     return "provider_error"
 
 
 def _raise_for_payload_error(data: dict[str, Any], api_key: str = "") -> None:
+    """Raise when Zhipu reports a failure inside an HTTP 200 response body."""
     error = data.get("error")
     if isinstance(error, dict):
         code = str(error.get("code") or "")
@@ -62,13 +66,10 @@ def _raise_for_payload_error(data: dict[str, Any], api_key: str = "") -> None:
         message = str(data.get("message") or data.get("msg") or "")
     else:
         return
-    detail = sanitize_provider_error_message(
-        message or "Zhipu reported a request failure",
-        additional_secrets=(api_key,),
-    )
+    detail = sanitize_provider_error_message(message or "Zhipu reported a request failure", additional_secrets=(api_key,))
     raise ProviderCallError(
         _classify_payload_error(code, message),
-        f"Zhipu error {code}: {detail}" if code else detail,
+        source_message('Zhipu error {0}: {1}', code, detail) if code else detail,
         additional_secrets=(api_key,),
     )
 

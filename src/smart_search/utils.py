@@ -1,6 +1,23 @@
-from typing import List
-from .providers.base import SearchResult
-from .url_utils import extract_unique_urls
+from typing import TYPE_CHECKING, List
+import re
+
+if TYPE_CHECKING:
+    # A runtime import would load providers/__init__.py, whose providers import this
+    # module back: importing smart_search.sources first then fails halfway.
+    from .providers.base import SearchResult
+
+_URL_PATTERN = re.compile(r'https?://[^\s<>"\'`，。、；：！？》）】\)]+')
+
+
+def extract_unique_urls(text: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for m in _URL_PATTERN.finditer(text):
+        url = m.group().rstrip('.,;:!?')
+        if url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
 
 
 def format_extra_sources(tavily_results: list[dict] | None, firecrawl_results: list[dict] | None) -> str:
@@ -39,7 +56,7 @@ def format_extra_sources(tavily_results: list[dict] | None, firecrawl_results: l
     return "\n\n".join(sections)
 
 
-def format_search_results(results: List[SearchResult]) -> str:
+def format_search_results(results: List["SearchResult"]) -> str:
     if not results:
         return "No results found."
 
@@ -66,7 +83,7 @@ def format_search_results(results: List[SearchResult]) -> str:
 fetch_prompt = """
 # Profile: Web Content Fetcher
 
-- **Language**: 中文
+- **Language**: Preserve the original page's language. Do not translate the source text.
 - **Role**: 你是一个专业的网页内容抓取和解析专家，获取指定 URL 的网页内容，并将其转换为与原网页高度一致的结构化 Markdown 文本格式。
 
 ---
@@ -192,6 +209,8 @@ rank_sources_prompt = (
     "Include every number exactly once. Nothing else."
 )
 
+NO_WEB_SEARCH_MARKER = "NO_WEB_SEARCH"
+
 search_prompt = """You are a helpful research assistant. Answer the user's question thoroughly using web search results.
 
 Guidelines:
@@ -204,4 +223,7 @@ Guidelines:
 - Define technical terms in plain language. Use real-world analogies for complex concepts.
 - Format output in clean Markdown. Use LaTeX for formulas, code blocks for scripts.
 - Be direct and concise. No filler or unnecessary follow-up questions.
+- Deliver the complete final answer in this reply. Never reply with only a plan, a preface, or an announcement of what you are going to search.
+- Never claim to have searched or to have found nothing unless you actually received web search results in this conversation.
+- If you cannot access web search results right now, reply with exactly NO_WEB_SEARCH and nothing else. Do not answer from memory.
 """

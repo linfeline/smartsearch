@@ -58,7 +58,7 @@ class Context7Provider(BaseSearchProvider):
 
     async def library(self, name: str, query: str = "", ctx=None) -> str:
         request_query = f"{name} {query}".strip()
-        endpoint = f"{self.api_url}/api/v2/search?query={quote(request_query)}"
+        endpoint = f"{self.api_url}/api/v2/libs/search?libraryName={quote(name)}&query={quote(query or name)}"
         await log_info(ctx, f"Context7 library: {request_query}", config.debug_enabled)
         start_time = time.time()
         try:
@@ -112,6 +112,13 @@ class Context7Provider(BaseSearchProvider):
         except Exception as e:
             elapsed_ms = round((time.time() - start_time) * 1000, 2)
             error_type, error = classify_provider_exception(e, additional_secrets=(self.api_key,))
+            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 404:
+                try:
+                    body = e.response.json()
+                except ValueError:
+                    body = None
+                if isinstance(body, dict) and body.get("error") == "no_relevant_snippets":
+                    error_type = "evidence_error"
             output = {
                 "ok": False,
                 "library_id": library_id,

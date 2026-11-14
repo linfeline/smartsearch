@@ -1,3 +1,4 @@
+from ..i18n import source_message
 import json
 import re
 import time
@@ -76,18 +77,18 @@ def parse_sub_domain_params(
         try:
             parsed = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"invalid --sub-domain-params JSON: {exc}") from exc
+            raise ValueError(source_message('invalid --sub-domain-params JSON: {0}', exc)) from exc
         if not isinstance(parsed, dict):
-            raise ValueError("--sub-domain-params must be a JSON object")
+            raise ValueError(source_message('--sub-domain-params must be a JSON object'))
         params.update(parsed)
     for item in key_values or []:
         token = (item or "").strip()
         if not token or "=" not in token:
-            raise ValueError(f"invalid --param value (expected key=value): {item!r}")
+            raise ValueError(source_message('invalid --param value (expected key=value): {0!r}', item))
         key, value = token.split("=", 1)
         key = key.strip()
         if not key:
-            raise ValueError(f"invalid --param value (empty key): {item!r}")
+            raise ValueError(source_message('invalid --param value (empty key): {0!r}', item))
         params[key] = value
     return params
 
@@ -193,7 +194,7 @@ class AnySearchProvider(BaseSearchProvider):
                     "provider": "anysearch",
                     "tool": "batch_search",
                     "error_type": "parameter_error",
-                    "error": f"too many queries: {len(queries)} (max 5)",
+                    "error": source_message('too many queries: {0} (max 5)', len(queries)),
                     "elapsed_ms": 0,
                 },
                 ensure_ascii=False,

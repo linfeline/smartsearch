@@ -1,6 +1,7 @@
 from .base import BaseSearchProvider, SearchResult
 from .anysearch import AnySearchProvider
 from .context7 import Context7Provider
+from .deepseek import DeepSeekToolsProvider
 from .openai_compatible import OpenAICompatibleSearchProvider
 from .xai_responses import XAIResponsesSearchProvider
 from .exa import ExaSearchProvider
@@ -16,6 +17,7 @@ __all__ = [
     "SearchResult",
     "AnySearchProvider",
     "Context7Provider",
+    "DeepSeekToolsProvider",
     "OpenAICompatibleSearchProvider",
     "XAIResponsesSearchProvider",
     "ExaSearchProvider",

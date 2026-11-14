@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .config import config
+from .state_files import file_lock
 
 
 STORE_FILENAME = "provider_health.json"
@@ -190,14 +191,19 @@ class ProviderHealthStore:
 
     def record_success(self, provider: str, fingerprint: str = "") -> None:
         # A success clears the record whatever it was keyed to.
-        del fingerprint
-        if not self.enabled:
+        try:
+            with file_lock(self.path, timeout=1.0):
+                del fingerprint
+                if not self.enabled:
+                    return
+                providers = self._load()
+                if provider not in providers:
+                    return
+                providers.pop(provider, None)
+                self._save(self._prune(providers))
+        except OSError:
+            # Health persistence must not make the provider request fail.
             return
-        providers = self._load()
-        if provider not in providers:
-            return
-        providers.pop(provider, None)
-        self._save(self._prune(providers))
 
     def record_failure(
         self,
@@ -207,34 +213,39 @@ class ProviderHealthStore:
         error: str = "",
     ) -> dict[str, Any]:
         """Count one failure and open the cooldown once the provider earns it."""
-        if not self.enabled:
+        try:
+            with file_lock(self.path, timeout=1.0):
+                if not self.enabled:
+                    return self._status_from_record(provider, None)
+                providers = self._load()
+                record = providers.get(provider) or {}
+                if fingerprint and str(record.get("fingerprint") or "") != fingerprint:
+                    record = {}
+                hard_failure = error_type in HARD_FAILURE_ERROR_TYPES
+                failures = int(record.get("consecutive_failures") or 0) + 1
+                now = self._clock()
+                cooldown_until = float(record.get("cooldown_until") or 0.0)
+                if hard_failure:
+                    cooldown_until = now + self.cooldown_seconds * HARD_FAILURE_COOLDOWN_MULTIPLIER
+                elif failures >= self.failure_threshold:
+                    cooldown_until = now + self.cooldown_seconds
+                updated = {
+                    "fingerprint": fingerprint,
+                    "consecutive_failures": failures,
+                    "error_type": error_type,
+                    "error": error,
+                    # The latest classification wins: a provider that now times out
+                    # instead of returning 401 is reachable again and worth probing.
+                    "hard_failure": hard_failure,
+                    "last_failure_at": now,
+                    "cooldown_until": cooldown_until,
+                }
+                providers[provider] = updated
+                self._save(self._prune(providers))
+                return self._status_from_record(provider, updated)
+        except OSError:
+            # Health persistence must not make the provider request fail.
             return self._status_from_record(provider, None)
-        providers = self._load()
-        record = providers.get(provider) or {}
-        if fingerprint and str(record.get("fingerprint") or "") != fingerprint:
-            record = {}
-        hard_failure = error_type in HARD_FAILURE_ERROR_TYPES
-        failures = int(record.get("consecutive_failures") or 0) + 1
-        now = self._clock()
-        cooldown_until = float(record.get("cooldown_until") or 0.0)
-        if hard_failure:
-            cooldown_until = now + self.cooldown_seconds * HARD_FAILURE_COOLDOWN_MULTIPLIER
-        elif failures >= self.failure_threshold:
-            cooldown_until = now + self.cooldown_seconds
-        updated = {
-            "fingerprint": fingerprint,
-            "consecutive_failures": failures,
-            "error_type": error_type,
-            "error": error,
-            # The latest classification wins: a provider that now times out
-            # instead of returning 401 is reachable again and worth probing.
-            "hard_failure": hard_failure,
-            "last_failure_at": now,
-            "cooldown_until": cooldown_until,
-        }
-        providers[provider] = updated
-        self._save(self._prune(providers))
-        return self._status_from_record(provider, updated)
 
     def snapshot(self) -> list[dict[str, Any]]:
         """Return every tracked provider, longest cooldown first."""
@@ -244,18 +255,23 @@ class ProviderHealthStore:
 
     def reset(self, providers: list[str] | None = None) -> list[str]:
         """Clear cooldowns; returns the providers that actually had one."""
-        records = self._load()
-        if providers is None:
-            cleared = sorted(records)
-            if cleared:
-                self._save({})
-            return cleared
-        cleared = [provider for provider in providers if provider in records]
-        if cleared:
-            for provider in cleared:
-                records.pop(provider, None)
-            self._save(self._prune(records))
-        return cleared
+        try:
+            with file_lock(self.path, timeout=1.0):
+                records = self._load()
+                if providers is None:
+                    cleared = sorted(records)
+                    if cleared:
+                        self._save({})
+                    return cleared
+                cleared = [provider for provider in providers if provider in records]
+                if cleared:
+                    for provider in cleared:
+                        records.pop(provider, None)
+                    self._save(self._prune(records))
+                return cleared
+        except OSError:
+            # Health persistence must not make the provider request fail.
+            return []
 
 
 provider_health = ProviderHealthStore()

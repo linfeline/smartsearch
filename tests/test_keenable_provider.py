@@ -52,7 +52,7 @@ async def test_keenable_provider_normalizes_public_search_results(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_keenable_provider_sends_bearer_key_when_configured(monkeypatch):
+async def test_keenable_provider_sends_x_api_key_when_configured(monkeypatch):
     class FakeAsyncClient:
         def __init__(self, timeout, follow_redirects=True):
             pass

@@ -101,7 +101,8 @@ def fallback_channels(svc: Any, query: str, candidates: list[dict], limit: int, 
                     item["capability"] in rule.required_capabilities)]
     preferred_capability = ("docs_search" if rule.docs_intent else "vertical_search" if rule.intent_signals.get("vertical_intent")
                             else "web_search" if rule.web_current_intent else "main_search")
-    web_order = svc.WEB_SEARCH_FALLBACK_CHAIN if rule.web_current_intent else svc.WEB_SEARCH_BROAD_CHAIN
+    web_order = (getattr(svc, "WEB_SEARCH_FALLBACK_CHAIN", ()) if rule.web_current_intent
+                 else getattr(svc, "WEB_SEARCH_BROAD_CHAIN", ()))
     return sorted(allowed, key=lambda item: (
         item["query"] != query,
         item["capability"] != preferred_capability,

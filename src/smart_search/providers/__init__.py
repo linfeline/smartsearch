@@ -8,6 +8,7 @@ from .exa import ExaSearchProvider
 from .jina import JinaReaderProvider
 from .sciverse import SciverseProvider
 from .doubao import DoubaoWebSearchProvider
+from .keenable import KeenableWebSearchProvider
 from .zhipu import ZhipuWebSearchProvider
 from .zhipu_mcp import ZhipuMCPProvider
 
@@ -23,6 +24,7 @@ __all__ = [
     "JinaReaderProvider",
     "SciverseProvider",
     "DoubaoWebSearchProvider",
+    "KeenableWebSearchProvider",
     "ZhipuWebSearchProvider",
     "ZhipuMCPProvider",
 ]
